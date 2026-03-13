@@ -7,17 +7,11 @@
 - Git
 - `curl`
 
-Install Python dependencies:
-
-```bash
-pip install fastapi uvicorn pydantic requests
-```
-
 ---
 
 ## 1. Build llama.cpp & Download the Model
 
-Run the setup script from the repo root. It will detect your hardware, build llama.cpp with the appropriate acceleration (CUDA, ROCm, Metal, etc.), and download the Llama 3.2 3B model automatically.
+Run the setup script from the repo root. It will install Python dependencies, detect your hardware, build llama.cpp with the appropriate acceleration (CUDA, ROCm, Metal, etc.), and download the Llama 3.2 3B model automatically.
 
 ```bash
 bash setup/setup_llama_cpp.sh
@@ -31,7 +25,9 @@ bash setup/setup_llama_cpp.sh
 
 This will produce:
 - `llama.cpp/llama-server` — the inference server binary
+- `llama.cpp/convert_lora_to_gguf.py` — adapter conversion script
 - `llama.cpp/models/llama-3.2-3b-instruct-q4_k_m.gguf` — the model
+- `adapters/` — created at the repo root if not already present
 
 ---
 
@@ -84,7 +80,7 @@ POST /v1/adapters
 }
 ```
 
-`adapter_dir` must be a subdirectory inside `llama.cpp/adapters/` containing a HuggingFace PEFT adapter (`adapter_config.json` + `adapter_model.safetensors`). The server will convert it to GGUF automatically.
+`adapter_dir` must be a subdirectory inside `adapters/` containing a HuggingFace PEFT adapter (`adapter_config.json` + `adapter_model.safetensors`). The server will convert it to GGUF automatically.
 
 ---
 
@@ -116,14 +112,13 @@ Returns the status of both the middleware and the underlying llama.cpp server.
 
 ## 4. Placing Adapters
 
-Put HuggingFace PEFT adapter directories inside `llama.cpp/adapters/`:
+Put HuggingFace PEFT adapter directories inside `adapters/` at the repo root:
 
 ```
-llama.cpp/
-  adapters/
-    my_adapter/
-      adapter_config.json
-      adapter_model.safetensors
+adapters/
+  my_adapter/
+    adapter_config.json
+    adapter_model.safetensors
 ```
 
 Then register via `POST /v1/adapters` with `"adapter_dir": "my_adapter"`.
@@ -137,15 +132,22 @@ Optionally include in the adapter directory:
 
 ---
 
-## 5. Testing
+## 5. Troubleshooting
 
-Test the middleware server directly:
+### Port already in use
+
+If the middleware fails to start with a timeout error, a leftover `llama-server` process may still be holding port 8080. Check and kill it:
 
 ```bash
-python testing/test_client.py
+lsof -i :8080 -i :4000
+kill <PID>
 ```
 
-Test the underlying llama.cpp server independently (port 8080):
+---
+
+## 6. Testing
+
+Test the middleware server:
 
 ```bash
 python testing/test_client.py
