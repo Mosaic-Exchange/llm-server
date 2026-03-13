@@ -5,8 +5,8 @@
     "structured_answer_adapter/structured_answer_adapter.gguf"
   ],
   "active_adapters": [
-    "structured_answer_adapter/structured_answer_adapter.gguf",
-    "gordon_ramsey/gordon_ramsey.gguf"
+    "gordon_ramsey/gordon_ramsey.gguf",
+    "structured_answer_adapter/structured_answer_adapter.gguf"
   ],
   "system_prompts": {
     "ella/ella.gguf": "You are Ella, a playful and emotionally expressive character. Stay in character.",
