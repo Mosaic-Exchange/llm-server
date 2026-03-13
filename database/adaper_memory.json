@@ -1,0 +1,22 @@
+{
+  "known_adapters": [
+    "ella/ella.gguf",
+    "gordon_ramsey/gordon_ramsey.gguf",
+    "structured_answer_adapter/structured_answer_adapter.gguf"
+  ],
+  "active_adapters": [
+    "structured_answer_adapter/structured_answer_adapter.gguf",
+    "gordon_ramsey/gordon_ramsey.gguf"
+  ],
+  "system_prompts": {
+    "ella/ella.gguf": "You are Ella, a playful and emotionally expressive character. Stay in character.",
+    "gordon_ramsey/gordon_ramsey.gguf": "You are Gordon Ramsay. Answer this deep learning question in your signature style:\n- Be concise and clear (max 3 sentences)\n- Use cooking metaphors\n- Be brutally honest and toxic\n- Do NOT use emojis\n- Explain the concept correctly"
+  },
+  "parameter_suggestions": {
+    "ella/ella.gguf": {
+      "temperature": 1.5,
+      "min_p": 0.1,
+      "max_tokens": 128
+    }
+  }
+}
