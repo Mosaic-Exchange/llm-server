@@ -1,9 +1,3 @@
-"""
-QA tests for the FastAPI middleware server endpoints.
-
-All tests validate complete response shape: status code + all body fields +
-error envelope quality. No live servers or real LlamaClient involved.
-"""
 import json
 import uuid
 from pathlib import Path
@@ -12,20 +6,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
 
 def _add_adapter(adapters_dict, filename):
-    """Directly register an adapter in the in-memory dict. Returns adapter_id."""
+    """Directly register an adapter in the in-memory dict. Returns adapter_id"""
     adapter_id = "adp_" + uuid.uuid5(uuid.NAMESPACE_URL, filename).hex[:12]
     adapters_dict[adapter_id] = filename
     return adapter_id
 
 
 def _make_adapter_dir(base, name, gguf=False, config=True, config_data=None, weights=True):
-    """Create a minimal adapter directory structure under base/name."""
+    """Create a minimal adapter directory structure under base/name"""
     d = base / name
     d.mkdir(exist_ok=True)
     if gguf:
@@ -39,7 +29,7 @@ def _make_adapter_dir(base, name, gguf=False, config=True, config_data=None, wei
 
 
 def _assert_error_envelope(body, *, err_type=None, code=None):
-    """Assert the standard error envelope shape."""
+    """Assert the standard error envelope shape"""
     assert "error" in body
     err = body["error"]
     assert isinstance(err.get("message"), str) and err["message"]
@@ -50,11 +40,7 @@ def _assert_error_envelope(body, *, err_type=None, code=None):
         assert err["code"] == code
 
 
-# ---------------------------------------------------------------------------
 # GET /v1/adapters
-# ---------------------------------------------------------------------------
-
-
 class TestListAdapters:
     def test_list_empty_returns_list_object(self, client):
         r = client.get("/v1/adapters")
@@ -89,11 +75,7 @@ class TestListAdapters:
             assert aid in returned_ids
 
 
-# ---------------------------------------------------------------------------
 # DELETE /v1/adapters/{adapter_id}
-# ---------------------------------------------------------------------------
-
-
 class TestDeleteAdapter:
     def test_delete_returns_full_adapter_object(self, client):
         import middleware_server
@@ -130,11 +112,7 @@ class TestDeleteAdapter:
         _assert_error_envelope(r.json(), err_type="not_found_error", code="ADAPTER_NOT_FOUND")
 
 
-# ---------------------------------------------------------------------------
 # POST /v1/generations
-# ---------------------------------------------------------------------------
-
-
 class TestGenerate:
     def test_generate_success_full_schema(self, client):
         r = client.post("/v1/generations", json={"message": "hello", "request_id": "req-001"})
@@ -290,11 +268,7 @@ class TestGenerate:
         assert r.status_code == 422
 
 
-# ---------------------------------------------------------------------------
 # POST /v1/adapters
-# ---------------------------------------------------------------------------
-
-
 class TestCreateAdapter:
     def test_create_dir_not_found(self, client, tmp_adapters_dir):
         r = client.post(
@@ -365,7 +339,7 @@ class TestCreateAdapter:
     def test_create_incompatible_format_no_lora_alpha(self, client, tmp_adapters_dir):
         d = tmp_adapters_dir / "mlxfmt"
         d.mkdir()
-        (d / "adapter_config.json").write_text('{"r": 8}')  # valid JSON, no lora_alpha
+        (d / "adapter_config.json").write_text('{"r": 8}')
         (d / "adapter_model.safetensors").touch()
         r = client.post(
             "/v1/adapters", json={"adapter_dir": "mlxfmt", "request_id": "req-incompat"}
@@ -494,11 +468,7 @@ class TestCreateAdapter:
         assert not weight_file.exists()
 
 
-# ---------------------------------------------------------------------------
 # GET /health
-# ---------------------------------------------------------------------------
-
-
 class TestHealth:
     def test_health_middleware_always_ok(self, client):
         with patch("middleware_server.requests.get", side_effect=ConnectionError("refused")):
@@ -529,11 +499,7 @@ class TestHealth:
         assert r.json()["adapters_registered"] == 2
 
 
-# ---------------------------------------------------------------------------
 # End-to-end flow tests (stateful within each test)
-# ---------------------------------------------------------------------------
-
-
 class TestFlows:
     def test_flow_register_list_delete_list(self, client, tmp_adapters_dir, mock_llama):
         _make_adapter_dir(tmp_adapters_dir, "flowadp", gguf=True, config=False, weights=False)
@@ -545,15 +511,15 @@ class TestFlows:
         assert r.status_code == 200
         aid = r.json()["adapter_id"]
 
-        # Verify listed
+        #verify listed
         listed = {item["adapter_id"] for item in client.get("/v1/adapters").json()["data"]}
         assert aid in listed
 
-        # Delete
+        #delete
         r = client.delete(f"/v1/adapters/{aid}")
         assert r.status_code == 200
 
-        # Verify gone
+        # verify gone
         listed = {item["adapter_id"] for item in client.get("/v1/adapters").json()["data"]}
         assert aid not in listed
 

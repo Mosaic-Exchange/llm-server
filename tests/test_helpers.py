@@ -1,22 +1,8 @@
-"""
-Tests for pure helper functions in middleware_server.
-
-No live servers, no fixtures needed — just import and call.
-"""
 from pathlib import Path
-
 import pytest
-
-# conftest.py already patched LlamaClient and added setup/ to sys.path,
-# so we can import directly.
 from middleware_server import _err_id_from_request_id, _validate_adapter_dir
 
-
-# ---------------------------------------------------------------------------
 # _err_id_from_request_id
-# ---------------------------------------------------------------------------
-
-
 class TestErrIdFromRequestId:
     def test_with_request_id_preserves_value(self):
         assert _err_id_from_request_id("req-123") == "err_req-123"
@@ -38,12 +24,7 @@ class TestErrIdFromRequestId:
     def test_deterministic_for_same_input(self):
         assert _err_id_from_request_id("abc") == _err_id_from_request_id("abc")
 
-
-# ---------------------------------------------------------------------------
 # _validate_adapter_dir
-# ---------------------------------------------------------------------------
-
-
 class TestValidateAdapterDir:
     def test_nonexistent_path_returns_none(self, tmp_path):
         assert _validate_adapter_dir(tmp_path / "nonexistent") is None
