@@ -113,7 +113,7 @@ class LlamaClient:
         resulting GGUF file. Raises RuntimeError if conversion fails.
         """
         convert_script = self._convert_script
-        base_config = self._adapters_dir / "llama32_3b_config"
+        base_config = Path(__file__).parent / "llama32_3b_config"
         outfile = adapter_dir / f"{adapter_dir.name}.gguf"
 
         cmd = [

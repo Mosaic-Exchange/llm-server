@@ -7,3 +7,4 @@ gguf
 pytest
 pytest-asyncio
 httpx
+transformers
