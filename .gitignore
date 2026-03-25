@@ -1,2 +1,8 @@
 /Users/danielarturi/Desktop/361_Group/llm-server/setup/load.config
 /Users/danielarturi/Desktop/361_Group/llm-server/llama.cpp
+__pycache__/
+*.pyc
+*.pyo
+llama.cpp/
+database/adaper_memory.json
+*.md
