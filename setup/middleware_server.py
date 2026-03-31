@@ -382,6 +382,7 @@ async def delete_adapter(adapter_id: str):
         )
 
     filename = _adapters.pop(adapter_id)
+    _llama.unregister_adapter(filename)
     return AdapterObject(adapter_id=adapter_id, adapter_filename=filename)
 
 
