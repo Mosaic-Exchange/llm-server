@@ -132,7 +132,14 @@ class LlamaClient:
 
         return self._active_adapters.index(filename)
 
+
     def _ensure_server_running(self):
+        """
+        This function serves to make sure that the background server is running.
+        The application has the two servers, the middleware one and the llama_cpp foundation
+        Before both had to be started individually, but this way a server user never has to touch
+        that other server (completely invisible)
+        """
         try:
             r = requests.get(f"{self.base_url}/health", timeout=2)
             if r.status_code == 200:
@@ -153,7 +160,7 @@ class LlamaClient:
                 "llama-server is not running and server_binary/model_path were not provided to start it."
             )
 
-        logger.info("llama-server not detected — starting it now.")
+        logger.info("llama-server not detected - starting it now.")
         self._reload_server()
 
     def _reload_server(self):
@@ -191,8 +198,10 @@ class LlamaClient:
             try:
                 r = requests.get(f"{self.base_url}/health", timeout=2)
                 if r.status_code == 200:
-                    logger.info("llama-server is ready.")
-                    return
+                    adapters = requests.get(f"{self.base_url}/lora-adapters", timeout=2).json()
+                    if len(adapters) == len(self._active_adapters):
+                        logger.info("llama-server is ready.")
+                        return
             except Exception:
                 pass
             time.sleep(1)
