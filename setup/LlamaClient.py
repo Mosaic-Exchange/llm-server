@@ -99,6 +99,16 @@ class LlamaClient:
             self._parameter_suggestions[filename] = parameter_suggestions
         self._save_adapter_memory()
 
+    def unregister_adapter(self, filename: str):
+        """Remove an adapter from the known list and persist the change."""
+        if filename in self._known_adapters:
+            self._known_adapters.remove(filename)
+        if filename in self._active_adapters:
+            self._active_adapters.remove(filename)
+        self._system_prompts.pop(filename, None)
+        self._parameter_suggestions.pop(filename, None)
+        self._save_adapter_memory()
+
     def get_system_prompt(self, filename: str) -> Optional[str]:
         """Return the system prompt for an adapter, or None if not set."""
         return self._system_prompts.get(filename)
