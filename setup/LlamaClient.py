@@ -1,4 +1,3 @@
-# llama_client.py
 import json
 import logging
 import subprocess
@@ -16,9 +15,7 @@ ADAPTER_MEMORY_PATH = Path(__file__).parent.parent / "database" / "adaper_memory
 
 
 class LlamaClient:
-    """Client for interacting with llama.cpp server with hot-swappable LoRA adapters"""
-
-    MAX_LOADED_ADAPTERS = 2
+    MAX_LOADED_ADAPTERS = 2 # This is arbitrary, maybe can be scaled up
 
     def __init__(
         self,
@@ -36,41 +33,26 @@ class LlamaClient:
         self._server_process: Optional[subprocess.Popen] = None
         self._port = urlparse(self.base_url).port or 8080
 
-        # All ever-registered adapter filenames
+        # LRU order: index 0 = least recently used
         self._known_adapters: List[str] = []
-        # Currently loaded adapters, ordered LRU→MRU (index 0 = LRU, last = MRU)
         self._active_adapters: List[str] = []
-        # Optional system prompts keyed by adapter filename
         self._system_prompts: Dict[str, str] = {}
-        # Optional generation parameter suggestions keyed by adapter filename
         self._parameter_suggestions: Dict[str, Dict[str, Any]] = {}
 
         self._load_adapter_memory()
         self._ensure_server_running()
 
-    # ------------------------------------------------------------------
-    # Adapter memory (persistence)
-    # ------------------------------------------------------------------
-
     def _load_adapter_memory(self):
-        """Load adapter lists from persistent storage on startup."""
         if not ADAPTER_MEMORY_PATH.exists():
             return
         with open(ADAPTER_MEMORY_PATH, "r") as f:
             data = json.load(f)
-        # Migrate old format: {"adapters": [{"filename": ..., "id": ...}]}
-        if "adapters" in data and "known_adapters" not in data:
-            filenames = [a["filename"] for a in data["adapters"]]
-            self._known_adapters = filenames
-            self._active_adapters = filenames[:]
-        else:
-            self._known_adapters = data.get("known_adapters", [])
-            self._active_adapters = data.get("active_adapters", [])
-            self._system_prompts = data.get("system_prompts", {})
-            self._parameter_suggestions = data.get("parameter_suggestions", {})
+        self._known_adapters = data.get("known_adapters", [])
+        self._active_adapters = data.get("active_adapters", [])
+        self._system_prompts = data.get("system_prompts", {})
+        self._parameter_suggestions = data.get("parameter_suggestions", {})
 
     def _save_adapter_memory(self):
-        """Persist adapter lists to disk."""
         ADAPTER_MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(ADAPTER_MEMORY_PATH, "w") as f:
             json.dump(
@@ -90,7 +72,6 @@ class LlamaClient:
         system_prompt: Optional[str] = None,
         parameter_suggestions: Optional[Dict[str, Any]] = None,
     ):
-        """Add an adapter to the known list. Optionally stores a system prompt and parameter suggestions."""
         if filename not in self._known_adapters:
             self._known_adapters.append(filename)
         if system_prompt is not None:
@@ -100,7 +81,6 @@ class LlamaClient:
         self._save_adapter_memory()
 
     def unregister_adapter(self, filename: str):
-        """Remove an adapter from the known list and persist the change."""
         if filename in self._known_adapters:
             self._known_adapters.remove(filename)
         if filename in self._active_adapters:
@@ -110,25 +90,18 @@ class LlamaClient:
         self._save_adapter_memory()
 
     def get_system_prompt(self, filename: str) -> Optional[str]:
-        """Return the system prompt for an adapter, or None if not set."""
         return self._system_prompts.get(filename)
 
     def get_parameter_suggestions(self, filename: str) -> Optional[Dict[str, Any]]:
-        """Return generation parameter suggestions for an adapter, or None if not set."""
         return self._parameter_suggestions.get(filename)
 
     def convert_adapter(self, adapter_dir: Path) -> Path:
-        """
-        Run convert_lora_to_gguf.py on adapter_dir and return the path to the
-        resulting GGUF file. Raises RuntimeError if conversion fails.
-        """
-        convert_script = self._convert_script
         base_config = Path(__file__).parent / "llama32_3b_config"
         outfile = adapter_dir / f"{adapter_dir.name}.gguf"
 
         cmd = [
             sys.executable,
-            str(convert_script),
+            str(self._convert_script),
             "--base", str(base_config),
             "--outfile", str(outfile),
             "--outtype", "q8_0",
@@ -141,26 +114,15 @@ class LlamaClient:
 
         return outfile
 
-    # ------------------------------------------------------------------
-    # LRU management + server reload
-    # ------------------------------------------------------------------
-
     def _ensure_adapter_active(self, filename: str) -> int:
-        """
-        Ensure the adapter is in the active set, evicting LRU and reloading
-        the server if necessary. Returns the llama.cpp integer id (index in
-        active_adapters after the update).
-        """
         if filename not in self._known_adapters:
             raise ValueError(f"Adapter '{filename}' is not in the known adapters list.")
 
         if filename in self._active_adapters:
-            # Already loaded — just update LRU order, no reload needed
             self._active_adapters.remove(filename)
             self._active_adapters.append(filename)
             self._save_adapter_memory()
         else:
-            # Not currently loaded — evict LRU if at capacity, then reload
             if len(self._active_adapters) >= self.MAX_LOADED_ADAPTERS:
                 evicted = self._active_adapters.pop(0)
                 logger.info(f"Evicting LRU adapter: {evicted}")
@@ -171,11 +133,18 @@ class LlamaClient:
         return self._active_adapters.index(filename)
 
     def _ensure_server_running(self):
-        """Start the llama-server if it is not already responding."""
         try:
             r = requests.get(f"{self.base_url}/health", timeout=2)
             if r.status_code == 200:
-                return  # already up
+                try:
+                    loaded = requests.get(f"{self.base_url}/lora-adapters", timeout=2).json()
+                    server_names = {Path(a["path"]).name for a in loaded}
+                    if server_names != set(self._active_adapters):
+                        logger.info("Server adapter state out of sync --> reloading.")
+                        self._reload_server()
+                except Exception:
+                    pass
+                return
         except Exception:
             pass
 
@@ -188,13 +157,11 @@ class LlamaClient:
         self._reload_server()
 
     def _reload_server(self):
-        """Kill the current llama-server and restart it with the active adapter set."""
         if not self._server_binary or not self._model_path:
             raise RuntimeError(
                 "server_binary and model_path must be provided to LlamaClient to support adapter reload."
             )
 
-        # Terminate any managed server process
         if self._server_process and self._server_process.poll() is None:
             self._server_process.terminate()
             try:
@@ -219,7 +186,6 @@ class LlamaClient:
         self._wait_for_server()
 
     def _wait_for_server(self, timeout: int = 120):
-        """Poll the health endpoint until the server is ready."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -232,18 +198,12 @@ class LlamaClient:
             time.sleep(1)
         raise TimeoutError(f"llama-server did not become ready within {timeout}s.")
 
-    # ------------------------------------------------------------------
-    # Adapter control (llama.cpp API)
-    # ------------------------------------------------------------------
-
     def list_adapters(self) -> List[Dict]:
-        """List all loaded LoRA adapters from the llama.cpp server."""
         response = requests.get(f"{self.base_url}/lora-adapters")
         response.raise_for_status()
         return response.json()
 
     def set_adapters(self, adapters: List[int]) -> Dict:
-        """Set which adapters to use for inference."""
         response = requests.post(f"{self.base_url}/lora-adapters", json=adapters)
         if response.status_code != 200:
             print(f"Error response: {response.text}")
@@ -251,7 +211,6 @@ class LlamaClient:
         return response.json()
 
     def use_base_only(self) -> Dict:
-        """Switch to base model (set all adapter scales to 0)."""
         adapters_info = self.list_adapters()
         payload = [{"id": a["id"], "scale": 0.0} for a in adapters_info]
         response = requests.post(f"{self.base_url}/lora-adapters", json=payload)
@@ -261,7 +220,6 @@ class LlamaClient:
         return response.json()
 
     def use_adapter(self, adapter_id: int, scale: float = 1.0) -> Dict:
-        """Activate a specific adapter by llama.cpp integer id at the given scale."""
         adapters_info = self.list_adapters()
         payload = [
             {"id": a["id"], "scale": scale if a["id"] == adapter_id else 0.0}
@@ -274,27 +232,19 @@ class LlamaClient:
         return response.json()
 
     def use_adapter_by_name(self, filename: str, scale: float = 1.0) -> int:
-        """
-        Ensure the adapter is active (evicting LRU + reloading if needed),
-        then activate it at the given scale. Returns the llama.cpp integer id.
-        """
+        # TODO: deprecate adapter_id in favor of this
         llama_id = self._ensure_adapter_active(filename)
         self.use_adapter(llama_id, scale)
         return llama_id
 
-    def set_adapter_scales(self, scales: Dict[int, float]) -> Dict:
-        """Set scales for multiple adapters at once."""
+    """def set_adapter_scales(self, scales: Dict[int, float]) -> Dict:
         adapters_info = self.list_adapters()
         payload = [{"id": a["id"], "scale": scales.get(a["id"], 0.0)} for a in adapters_info]
         response = requests.post(f"{self.base_url}/lora-adapters", json=payload)
         if response.status_code != 200:
             print(f"Error response: {response.text}")
             response.raise_for_status()
-        return response.json()
-
-    # ------------------------------------------------------------------
-    # Chat / completions
-    # ------------------------------------------------------------------
+        return response.json()"""
 
     def chat(
         self,
@@ -308,12 +258,6 @@ class LlamaClient:
         system_prompt: Optional[str] = None,
         stream: bool = False,
     ) -> Union[str, iter]:
-        """
-        Send a chat completion request.
-
-        Prefer adapter_filename — it supports LRU eviction and automatic reload.
-        adapter_id (integer) is kept for backward compatibility but bypasses LRU logic.
-        """
         if adapter_filename is not None:
             self.use_adapter_by_name(adapter_filename, adapter_scale)
         elif adapter_id is not None:
@@ -327,7 +271,7 @@ class LlamaClient:
         else:
             messages = message
 
-        payload: Dict[str, Any] = {
+        payload = {
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -345,7 +289,7 @@ class LlamaClient:
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
 
-    def _stream_chat(self, payload: Dict):
+    """def _stream_chat(self, payload: Dict):
         payload["stream"] = True
         response = requests.post(
             f"{self.base_url}/v1/chat/completions", json=payload, stream=True
@@ -388,24 +332,22 @@ class LlamaClient:
 
         response = requests.post(f"{self.base_url}/v1/completions", json=payload)
         response.raise_for_status()
-        return response.json()["choices"][0]["text"]
+        return response.json()["choices"][0]["text"]"""
 
 
 if __name__ == "__main__":
     client = LlamaClient()
 
-    print("=== Checking loaded adapters ===")
+    print("loaded adapters:")
     adapters = client.list_adapters()
     print(json.dumps(adapters, indent=2))
-    print()
 
-    print("=== Test 1: Base Model ===")
+    print("\nbase model:")
     client.use_base_only()
     response = client.chat("Say 'I am the base model'")
     print(response)
-    print()
 
-    print("=== Test 2: Adapter by name ===")
+    print("\nadapter by name:")
     response = client.chat(
         "Say 'I am using the adapter'",
         adapter_filename="structured_answer_adapter.gguf",

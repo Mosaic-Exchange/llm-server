@@ -43,15 +43,15 @@ LLAMA_MODEL_PATH = str(_PROJECT_ROOT / "llama.cpp" / "models" / "llama-3.2-3b-in
 LLAMA_ADAPTERS_DIR = str(_PROJECT_ROOT / "adapters")
 LLAMA_CONVERT_SCRIPT = str(_PROJECT_ROOT / "utilities" / "convert_lora_to_gguf.py")
 MAX_TOKENS_MIN = 1
-MAX_TOKENS_MAX = 500  # per API doc
+MAX_TOKENS_MAX = 500
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 0.7
 
-# ----------------------------
-# App + shared state
-# ----------------------------
+# App def
 app = FastAPI(title="mosaicAI Middleware", version="1.0")
 
+# This is essentially the object that the middleware is in charge of managing
+# and interacting with
 _llama = LlamaClient(
     base_url=LLAMA_BASE_URL,
     server_binary=LLAMA_SERVER_BINARY,
@@ -61,10 +61,11 @@ _llama = LlamaClient(
 )
 
 # Adapter registry (in-memory): adapter_id -> adapter_filename
-# The design doc says no DB; this resets when the server restarts.
+# When the server is reloaded this can be populated using the information
+# That was written in the json file
 _adapters: Dict[str, str] = {}
 
-# Critical: llama.cpp adapter selection is process-global; serialize generation calls.
+# llama.cpp adapter selection is process-global; serialize generation calls.
 _generation_lock = asyncio.Lock()
 
 
@@ -72,7 +73,7 @@ _generation_lock = asyncio.Lock()
 async def _autoload_adapters_from_memory():
     """Populate the adapter registry from adaper_memory.json on startup."""
     for filename in _llama._known_adapters:
-        # Deterministic adapter_id based on filename so IDs are stable across restarts
+        # Deterministic adapter_id based on filename so IDs are the same across restarts
         adapter_id = "adp_" + uuid.uuid5(uuid.NAMESPACE_URL, filename).hex[:12]
         _adapters[adapter_id] = filename
 
