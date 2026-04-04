@@ -4,7 +4,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -212,22 +212,6 @@ class LlamaClient:
         response.raise_for_status()
         return response.json()
 
-    def set_adapters(self, adapters: List[int]) -> Dict:
-        response = requests.post(f"{self.base_url}/lora-adapters", json=adapters)
-        if response.status_code != 200:
-            print(f"Error response: {response.text}")
-            response.raise_for_status()
-        return response.json()
-
-    def use_base_only(self) -> Dict:
-        adapters_info = self.list_adapters()
-        payload = [{"id": a["id"], "scale": 0.0} for a in adapters_info]
-        response = requests.post(f"{self.base_url}/lora-adapters", json=payload)
-        if response.status_code != 200:
-            print(f"Error response: {response.text}")
-            response.raise_for_status()
-        return response.json()
-
     def use_adapter(self, adapter_id: int, scale: float = 1.0) -> Dict:
         adapters_info = self.list_adapters()
         payload = [
@@ -246,39 +230,23 @@ class LlamaClient:
         self.use_adapter(llama_id, scale)
         return llama_id
 
-    """def set_adapter_scales(self, scales: Dict[int, float]) -> Dict:
-        adapters_info = self.list_adapters()
-        payload = [{"id": a["id"], "scale": scales.get(a["id"], 0.0)} for a in adapters_info]
-        response = requests.post(f"{self.base_url}/lora-adapters", json=payload)
-        if response.status_code != 200:
-            print(f"Error response: {response.text}")
-            response.raise_for_status()
-        return response.json()"""
-
     def chat(
         self,
-        message: Union[str, List[Dict[str, str]]],
-        adapter_id: Optional[int] = None,
+        message: str,
         adapter_filename: Optional[str] = None,
         adapter_scale: float = 1.0,
         temperature: float = 0.7,
         max_tokens: int = 500,
         min_p: Optional[float] = None,
         system_prompt: Optional[str] = None,
-        stream: bool = False,
-    ) -> Union[str, iter]:
+    ) -> str:
         if adapter_filename is not None:
             self.use_adapter_by_name(adapter_filename, adapter_scale)
-        elif adapter_id is not None:
-            self.use_adapter(adapter_id, adapter_scale)
 
-        if isinstance(message, str):
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": message})
-        else:
-            messages = message
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": message})
 
         payload = {
             "messages": messages,
@@ -288,60 +256,12 @@ class LlamaClient:
         if min_p is not None:
             payload["min_p"] = min_p
 
-        if stream:
-            return self._stream_chat(payload)
-        else:
-            return self._send_chat(payload)
+        return self._send_chat(payload)
 
     def _send_chat(self, payload: Dict) -> str:
         response = requests.post(f"{self.base_url}/v1/chat/completions", json=payload)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
-
-    """def _stream_chat(self, payload: Dict):
-        payload["stream"] = True
-        response = requests.post(
-            f"{self.base_url}/v1/chat/completions", json=payload, stream=True
-        )
-        response.raise_for_status()
-        for line in response.iter_lines():
-            if line:
-                line = line.decode("utf-8")
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                        if chunk.get("choices"):
-                            content = chunk["choices"][0].get("delta", {}).get("content", "")
-                            if content:
-                                yield content
-                    except json.JSONDecodeError:
-                        continue
-
-    def completion(
-        self,
-        prompt: str,
-        adapter_id: Optional[int] = None,
-        adapter_filename: Optional[str] = None,
-        adapter_scale: float = 1.0,
-        temperature: float = 0.7,
-        max_tokens: int = 500,
-        stop: Optional[List[str]] = None,
-    ) -> str:
-        if adapter_filename is not None:
-            self.use_adapter_by_name(adapter_filename, adapter_scale)
-        elif adapter_id is not None:
-            self.use_adapter(adapter_id, adapter_scale)
-
-        payload = {"prompt": prompt, "temperature": temperature, "max_tokens": max_tokens}
-        if stop:
-            payload["stop"] = stop
-
-        response = requests.post(f"{self.base_url}/v1/completions", json=payload)
-        response.raise_for_status()
-        return response.json()["choices"][0]["text"]"""
 
 
 if __name__ == "__main__":
@@ -350,11 +270,6 @@ if __name__ == "__main__":
     print("loaded adapters:")
     adapters = client.list_adapters()
     print(json.dumps(adapters, indent=2))
-
-    print("\nbase model:")
-    client.use_base_only()
-    response = client.chat("Say 'I am the base model'")
-    print(response)
 
     print("\nadapter by name:")
     response = client.chat(
