@@ -339,3 +339,9 @@ async def health():
         "llama_detail": llama_status,
         "adapters_registered": len(_adapters),
     }
+
+
+if __name__ == '__main__':
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=4000, log_level='trace')
