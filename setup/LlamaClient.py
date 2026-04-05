@@ -11,7 +11,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-ADAPTER_MEMORY_PATH = Path(__file__).parent.parent / "database" / "adaper_memory.json"
+ADAPTER_MEMORY_PATH = Path(__file__).parent.parent / "database" / "adapter_memory.json"
 
 
 class LlamaClient:
