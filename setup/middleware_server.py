@@ -1,25 +1,8 @@
-"""
-mosaicAI Middleware Server (FastAPI)
-
-Implements the API described in "AI Team Design Doc.pdf":
-- POST   /v1/generations
-- POST   /v1/adapters
-- DELETE /v1/adapters/{adapter_id}
-- GET    /v1/adapters
-
-Notes:
-- No database is used; adapter registry is in-memory (per the doc).
-- Adapter selection on the underlying llama.cpp server is global state, so /v1/generations
-  uses an asyncio lock to prevent cross-request adapter switching races.
-
-Run:
-  pip install fastapi uvicorn pydantic requests
-  python -m uvicorn middleware_server:app --host 127.0.0.1 --port 4000
-"""
-
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import uuid
 from typing import Any, Dict, List, Literal, Optional
 
@@ -29,13 +12,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-# Import your llama client. Ensure LlamaClient.py (or llama_client.py) is on PYTHONPATH.
 from LlamaClient import LlamaClient  # uploaded file name
 
 
-# ----------------------------
-# Config
-# ----------------------------
 LLAMA_BASE_URL = "http://127.0.0.1:8080"
 _PROJECT_ROOT = Path(__file__).parent.parent
 LLAMA_SERVER_BINARY = str(_PROJECT_ROOT / "llama.cpp" / "llama-server")
@@ -47,7 +26,6 @@ MAX_TOKENS_MAX = 500
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 0.7
 
-# App def
 app = FastAPI(title="mosaicAI Middleware", version="1.0")
 
 # This is essentially the object that the middleware is in charge of managing
@@ -71,7 +49,6 @@ _generation_lock = asyncio.Lock()
 
 @app.on_event("startup")
 async def _autoload_adapters_from_memory():
-    """Populate the adapter registry from adaper_memory.json on startup."""
     for filename in _llama._known_adapters:
         # Deterministic adapter_id based on filename so IDs are the same across restarts
         adapter_id = "adp_" + uuid.uuid5(uuid.NAMESPACE_URL, filename).hex[:12]
@@ -80,7 +57,6 @@ async def _autoload_adapters_from_memory():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    """Terminate the managed llama-server process on shutdown."""
     import subprocess
     if _llama._server_process and _llama._server_process.poll() is None:
         _llama._server_process.terminate()
@@ -90,9 +66,6 @@ async def _shutdown():
             _llama._server_process.kill()
 
 
-# ----------------------------
-# API models
-# ----------------------------
 class ErrorInner(BaseModel):
     type: Literal["invalid_request_error", "not_found_error", "api_error"]
     code: str
@@ -133,9 +106,6 @@ class AdapterListObject(BaseModel):
     data: List[AdapterObject]
 
 
-# ----------------------------
-# Error helpers
-# ----------------------------
 def _err_id_from_request_id(request_id: Optional[str]) -> str:
     # Doc says err_id is unique based on request id for tracing.
     if request_id:
@@ -156,7 +126,6 @@ def _error_response(
     return JSONResponse(status_code=http_status, content=body)
 
 
-# Ensure FastAPI validation errors match the envelope (best-effort)
 @app.exception_handler(HTTPException)
 async def _http_exception_handler(_request: Request, exc: HTTPException):
     # If the handler is called with our own JSONResponse, it won't reach here.
@@ -170,9 +139,6 @@ async def _http_exception_handler(_request: Request, exc: HTTPException):
     )
 
 
-# ----------------------------
-# Adapter utilities
-# ----------------------------
 _REQUIRED_ADAPTER_FILES = {"adapter_config.json"}
 _ADAPTER_WEIGHTS_OPTIONS = {"adapter_model.safetensors", "adapter_model.bin"}
 
@@ -187,26 +153,11 @@ def _validate_adapter_dir(adapter_path: Path) -> Optional[str]:
     return f"Missing required files: {', '.join(missing)}" if missing else None
 
 
-def _adapter_exists_in_registry(adapter_id: str) -> bool:
-    return adapter_id in _adapters
-
-
-def _resolve_adapter_for_llama(adapter_id: str) -> Dict[str, Any]:
-    """Translate a middleware adapter_id (UUID) to the filename the LlamaClient expects."""
-    if adapter_id in _adapters:
-        return {"adapter_filename": _adapters[adapter_id]}
-    raise KeyError("unmappable_adapter_id")
-
-
-# ----------------------------
-# Endpoints: Generations
-# ----------------------------
 @app.post("/v1/generations", response_model=GenerationObject, responses={400: {"model": ErrorEnvelope}, 404: {"model": ErrorEnvelope}, 500: {"model": ErrorEnvelope}})
 async def create_generation(req: GenerationCreateRequest):
-    # Validate adapter_id if provided
     adapter_kwargs: Dict[str, Any] = {}
     if req.adapter_id:
-        if not _adapter_exists_in_registry(req.adapter_id):
+        if req.adapter_id not in _adapters:
             return _error_response(
                 http_status=404,
                 err_type="not_found_error",
@@ -214,18 +165,8 @@ async def create_generation(req: GenerationCreateRequest):
                 message="The specified adapter_id does not exist.",
                 request_id=req.request_id,
             )
-        try:
-            adapter_kwargs = _resolve_adapter_for_llama(req.adapter_id)
-        except KeyError:
-            return _error_response(
-                http_status=404,
-                err_type="not_found_error",
-                code="ADAPTER_NOT_FOUND",
-                message="The specified adapter_id does not exist (cannot be mapped for backend).",
-                request_id=req.request_id,
-            )
+        adapter_kwargs = {"adapter_filename": _adapters[req.adapter_id]}
 
-    # Resolve generation parameters: system defaults → adapter suggestions → caller-provided
     temperature = DEFAULT_TEMPERATURE
     max_tokens = DEFAULT_MAX_TOKENS
     min_p = None
@@ -240,7 +181,6 @@ async def create_generation(req: GenerationCreateRequest):
             max_tokens = suggestions.get("max_tokens", max_tokens)
             min_p = suggestions.get("min_p", min_p)
 
-    # Caller-provided max_tokens wins over adapter suggestion
     if req.max_tokens is not None:
         max_tokens = req.max_tokens
 
@@ -253,7 +193,7 @@ async def create_generation(req: GenerationCreateRequest):
             request_id=req.request_id,
         )
 
-    # Call llama backend in a critical section (adapter switching is global state)
+    # adapter switching is global state — serialize across requests
     async with _generation_lock:
         try:
             output = _llama.chat(
@@ -261,7 +201,6 @@ async def create_generation(req: GenerationCreateRequest):
                 temperature=temperature,
                 max_tokens=max_tokens,
                 min_p=min_p,
-                stream=False,
                 system_prompt=system_prompt,
                 **adapter_kwargs,
             )
@@ -274,20 +213,13 @@ async def create_generation(req: GenerationCreateRequest):
                 request_id=req.request_id,
             )
 
-    return GenerationObject(request_id=req.request_id, output=str(output))
+    return GenerationObject(request_id=req.request_id, output=output)
 
 
-# ----------------------------
-# Endpoints: Adapters
-# ----------------------------
 @app.post("/v1/adapters", response_model=AdapterObject, responses={400: {"model": ErrorEnvelope}, 404: {"model": ErrorEnvelope}, 500: {"model": ErrorEnvelope}})
 async def create_adapter(req: AdapterCreateRequest):
-    import json as _json
-    import logging
-
     adapter_path = Path(LLAMA_ADAPTERS_DIR) / req.adapter_dir
 
-    # Check directory exists
     if not adapter_path.exists() or not adapter_path.is_dir():
         return _error_response(
             http_status=404,
@@ -305,7 +237,7 @@ async def create_adapter(req: AdapterCreateRequest):
         if config_path.exists():
             try:
                 with open(config_path) as f:
-                    _cfg = _json.load(f)
+                    _cfg = json.load(f)
                 if "lora_alpha" not in _cfg:
                     return _error_response(
                         http_status=400,
@@ -317,7 +249,6 @@ async def create_adapter(req: AdapterCreateRequest):
             except ValueError:
                 pass  # malformed JSON is caught later by the conversion step
 
-        # Check required files are present
         msg = _validate_adapter_dir(adapter_path)
         if msg:
             return _error_response(
@@ -360,9 +291,8 @@ async def create_adapter(req: AdapterCreateRequest):
     parameter_suggestions = None
     if suggestions_file.exists():
         try:
-            raw = _json.loads(suggestions_file.read_text())
-            _ALLOWED_PARAMS = {"temperature", "min_p", "max_tokens"}
-            parameter_suggestions = {k: v for k, v in raw.items() if k in _ALLOWED_PARAMS}
+            raw = json.loads(suggestions_file.read_text())
+            parameter_suggestions = {k: v for k, v in raw.items() if k in {"temperature", "min_p", "max_tokens"}}
         except ValueError:
             pass  # malformed JSON — silently ignore, adapter still registers without suggestions
 
@@ -393,7 +323,6 @@ async def list_adapters():
     return AdapterListObject(data=data)
 
 
-# Optional: simple health endpoint for local debugging (not part of the doc)
 @app.get("/health")
 async def health():
     try:
