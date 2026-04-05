@@ -261,7 +261,6 @@ async def create_generation(req: GenerationCreateRequest):
                 temperature=temperature,
                 max_tokens=max_tokens,
                 min_p=min_p,
-                stream=False,
                 system_prompt=system_prompt,
                 **adapter_kwargs,
             )
@@ -410,3 +409,9 @@ async def health():
         "llama_detail": llama_status,
         "adapters_registered": len(_adapters),
     }
+
+
+if __name__ == '__main__':
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=4000, log_level='trace')
