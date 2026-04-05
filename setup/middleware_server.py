@@ -139,12 +139,9 @@ async def _http_exception_handler(_request: Request, exc: HTTPException):
     )
 
 
-_REQUIRED_ADAPTER_FILES = {"adapter_config.json"}
 _ADAPTER_WEIGHTS_OPTIONS = {"adapter_model.safetensors", "adapter_model.bin"}
 
 def _validate_adapter_dir(adapter_path: Path) -> Optional[str]:
-    if not adapter_path.exists() or not adapter_path.is_dir():
-        return None  # caller handles the 404 case separately
     missing = []
     if not (adapter_path / "adapter_config.json").exists():
         missing.append("adapter_config.json")
@@ -172,7 +169,7 @@ async def create_generation(req: GenerationCreateRequest):
     min_p = None
     system_prompt = None
 
-    if req.adapter_id and req.adapter_id in _adapters:
+    if req.adapter_id:
         filename = _adapters[req.adapter_id]
         system_prompt = _llama.get_system_prompt(filename)
         suggestions = _llama.get_parameter_suggestions(filename)
