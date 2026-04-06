@@ -4,7 +4,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -239,7 +239,8 @@ class LlamaClient:
         max_tokens: int = 500,
         min_p: Optional[float] = None,
         system_prompt: Optional[str] = None,
-    ) -> str:
+        stream: bool = False,
+    ):
         if adapter_filename is not None:
             self.use_adapter_by_name(adapter_filename, adapter_scale)
 
@@ -256,12 +257,36 @@ class LlamaClient:
         if min_p is not None:
             payload["min_p"] = min_p
 
+        if stream:
+            return self._stream_chat(payload)
         return self._send_chat(payload)
 
     def _send_chat(self, payload: Dict) -> str:
         response = requests.post(f"{self.base_url}/v1/chat/completions", json=payload)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
+
+    def _stream_chat(self, payload: Dict) -> Iterator[str]:
+        payload["stream"] = True
+        response = requests.post(
+            f"{self.base_url}/v1/chat/completions", json=payload, stream=True
+        )
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if line:
+                line = line.decode("utf-8")
+                if line.startswith("data: "):
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        if chunk.get("choices"):
+                            content = chunk["choices"][0].get("delta", {}).get("content", "")
+                            if content:
+                                yield content
+                    except json.JSONDecodeError:
+                        continue
 
 
 if __name__ == "__main__":

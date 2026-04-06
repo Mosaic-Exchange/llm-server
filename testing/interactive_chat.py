@@ -38,7 +38,7 @@ def get_active_adapters() -> list[dict]:
         return []
 
 
-def generate(message: str, adapter_id: str | None) -> str:
+def generate(message: str, adapter_id: str | None) -> None:
     payload = {
         "message": message,
         "request_id": uuid.uuid4().hex[:8],
@@ -46,11 +46,17 @@ def generate(message: str, adapter_id: str | None) -> str:
     if adapter_id:
         payload["adapter_id"] = adapter_id
 
-    r = requests.post(f"{MIDDLEWARE_URL}/v1/generations", json=payload, timeout=120)
+    r = requests.post(f"{MIDDLEWARE_URL}/v1/generations/stream", json=payload, stream=True, timeout=120)
     if r.status_code != 200:
-        err = r.json().get("error", {})
-        return f"[ERROR {r.status_code}] {err.get('message', r.text)}"
-    return r.json().get("output", "")
+        try:
+            err = r.json().get("error", {})
+            print(f"[ERROR {r.status_code}] {err.get('message', r.text)}")
+        except Exception:
+            print(f"[ERROR {r.status_code}] {r.text}")
+        return
+    for chunk in r.iter_content(chunk_size=None):
+        print(chunk.decode("utf-8"), end="", flush=True)
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +137,8 @@ def main() -> None:
             continue
 
         # ---- generate ----
-        print("\n  Generating...", end="\r")
-        response = generate(query, selected_id)
-        print(f"  Assistant: {response}\n")
+        print("\n  Assistant: ", end="", flush=True)
+        generate(query, selected_id)
         print("  " + "-" * 60)
 
 

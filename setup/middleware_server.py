@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Literal, Optional
 import requests
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from LlamaClient import LlamaClient  # uploaded file name
@@ -152,7 +152,7 @@ def _validate_adapter_dir(adapter_path: Path) -> Optional[str]:
 
 @app.post("/v1/generations", response_model=GenerationObject, responses={400: {"model": ErrorEnvelope}, 404: {"model": ErrorEnvelope}, 500: {"model": ErrorEnvelope}})
 async def create_generation(req: GenerationCreateRequest):
-    adapter_kwargs: Dict[str, Any] = {}
+    adapter_kwargs = {}
     if req.adapter_id:
         if req.adapter_id not in _adapters:
             return _error_response(
@@ -190,7 +190,7 @@ async def create_generation(req: GenerationCreateRequest):
             request_id=req.request_id,
         )
 
-    # adapter switching is global state — serialize across requests
+    # adapter switching is global state, serialize
     async with _generation_lock:
         try:
             output = _llama.chat(
@@ -211,6 +211,69 @@ async def create_generation(req: GenerationCreateRequest):
             )
 
     return GenerationObject(request_id=req.request_id, output=output)
+
+
+@app.post("/v1/generations/stream")
+async def create_generation_stream(req: GenerationCreateRequest):
+    adapter_kwargs = {}
+    if req.adapter_id:
+        if req.adapter_id not in _adapters:
+            return _error_response(
+                http_status=404,
+                err_type="not_found_error",
+                code="ADAPTER_NOT_FOUND",
+                message="The specified adapter_id does not exist.",
+                request_id=req.request_id,
+            )
+        adapter_kwargs = {"adapter_filename": _adapters[req.adapter_id]}
+
+    temperature = DEFAULT_TEMPERATURE
+    max_tokens = DEFAULT_MAX_TOKENS
+    min_p = None
+    system_prompt = None
+
+    if req.adapter_id:
+        filename = _adapters[req.adapter_id]
+        system_prompt = _llama.get_system_prompt(filename)
+        suggestions = _llama.get_parameter_suggestions(filename)
+        if suggestions:
+            temperature = suggestions.get("temperature", temperature)
+            max_tokens = suggestions.get("max_tokens", max_tokens)
+            min_p = suggestions.get("min_p", min_p)
+
+    if req.max_tokens is not None:
+        max_tokens = req.max_tokens
+
+    if not (MAX_TOKENS_MIN <= max_tokens <= MAX_TOKENS_MAX):
+        return _error_response(
+            http_status=400,
+            err_type="invalid_request_error",
+            code="INVALID_MAX_TOKENS",
+            message=f"max tokens must be between {MAX_TOKENS_MIN} and {MAX_TOKENS_MAX}.",
+            request_id=req.request_id,
+        )
+
+    async def stream():
+        sentinel = object()
+        loop = asyncio.get_event_loop()
+        # adapter switching --> hold lock for entire stream duration
+        async with _generation_lock:
+            gen = _llama.chat(
+                message=req.message,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                min_p=min_p,
+                system_prompt=system_prompt,
+                stream=True,
+                **adapter_kwargs,
+            )
+            while True:
+                chunk = await loop.run_in_executor(None, next, gen, sentinel)
+                if chunk is sentinel:
+                    break
+                yield chunk
+
+    return StreamingResponse(stream(), media_type="text/plain")
 
 
 @app.post("/v1/adapters", response_model=AdapterObject, responses={400: {"model": ErrorEnvelope}, 404: {"model": ErrorEnvelope}, 500: {"model": ErrorEnvelope}})
@@ -268,7 +331,7 @@ async def create_adapter(req: AdapterCreateRequest):
                 request_id=req.request_id,
             )
 
-        # Delete weight files — no longer needed once GGUF exists
+        # Delete weight files as they are no longer needed once GGUF exists
         for disposable in ("adapter_model.safetensors", "adapter_model.bin", "adapter_config.json"):
             p = adapter_path / disposable
             if p.exists():
@@ -291,7 +354,7 @@ async def create_adapter(req: AdapterCreateRequest):
             raw = json.loads(suggestions_file.read_text())
             parameter_suggestions = {k: v for k, v in raw.items() if k in {"temperature", "min_p", "max_tokens"}}
         except ValueError:
-            pass  # malformed JSON — silently ignore, adapter still registers without suggestions
+            pass  # malformed json, silently ignore, adapter still registers without suggestions
 
     _llama.register_adapter(gguf_filename, system_prompt=system_prompt, parameter_suggestions=parameter_suggestions)
 
