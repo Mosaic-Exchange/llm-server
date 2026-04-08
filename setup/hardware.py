@@ -4,9 +4,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import psutil
+
 logger = logging.getLogger("uvicorn")
 
-_ADAPTER_SIZE_ESTIMATE_BYTES = 100 * 1024 * 1024   
+_ADAPTER_SIZE_ESTIMATE_BYTES = 100 * 1024 * 1024
 _INFERENCE_OVERHEAD_BYTES    = int(1.5 * 1024 ** 3)
 _BUDGET_FRACTION             = 0.50
 _MAX_CAP                     = 10
@@ -15,7 +17,7 @@ _FALLBACK                    = 2
 
 
 def _infer_build_type_from_platform() -> str:
-    # no load config 
+    # no load config
     if sys.platform == "darwin":
         if platform.machine() == "arm64":
             return "Metal (Apple Silicon GPU acceleration)"
@@ -51,17 +53,8 @@ def _get_os_overhead_bytes(build_type: str) -> int:
 
 
 def get_total_ram_bytes(build_type: str) -> int:
-   # get total ram for computation based on the type of hardware from load.config
-    bt = build_type.lower()
-
-    if "metal" in bt or "accelerate" in bt:
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return int(result.stdout.strip())
-
-    if "cuda" in bt:
+    # get total ram for computation based on the type of hardware from load.config
+    if "cuda" in build_type.lower():
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
@@ -69,55 +62,7 @@ def get_total_ram_bytes(build_type: str) -> int:
         mib = int(result.stdout.strip().splitlines()[0])
         return mib * 1024 * 1024
 
-    if "hip" in bt or "rocm" in bt or "blas" in bt or "vulkan" in bt or "cpu" in bt:
-        return _read_proc_meminfo()
-
-    # load.config absent
-    if sys.platform == "darwin":
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return int(result.stdout.strip())
-
-    if sys.platform.startswith("linux"):
-        return _read_proc_meminfo()
-
-    if sys.platform == "win32":
-        return _read_windows_ram()
-
-    raise RuntimeError(f"unsupported platform: {sys.platform!r}")
-
-
-def _read_proc_meminfo() -> int:
-    with open("/proc/meminfo") as f:
-        for line in f:
-            if line.startswith("MemTotal:"):
-                kb = int(line.split()[1])
-                return kb * 1024
-    raise RuntimeError("MemTotal not found in /proc/meminfo")
-
-
-def _read_windows_ram() -> int:
-    import ctypes
-
-    class MEMORYSTATUSEX(ctypes.Structure):
-        _fields_ = [
-            ("dwLength",                ctypes.c_ulong),
-            ("dwMemoryLoad",            ctypes.c_ulong),
-            ("ullTotalPhys",            ctypes.c_ulonglong),
-            ("ullAvailPhys",            ctypes.c_ulonglong),
-            ("ullTotalPageFile",        ctypes.c_ulonglong),
-            ("ullAvailPageFile",        ctypes.c_ulonglong),
-            ("ullTotalVirtual",         ctypes.c_ulonglong),
-            ("ullAvailVirtual",         ctypes.c_ulonglong),
-            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-        ]
-
-    ms = MEMORYSTATUSEX()
-    ms.dwLength = ctypes.sizeof(ms)
-    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
-    return ms.ullTotalPhys
+    return psutil.virtual_memory().total
 
 
 def get_model_size_bytes(model_path) -> int:
