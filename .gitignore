@@ -2,3 +2,4 @@ setup/load.config
 llama.cpp/
 llama.cpp/*
 *.md
+database/

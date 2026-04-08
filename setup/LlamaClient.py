@@ -9,13 +9,14 @@ from urllib.parse import urlparse
 
 import requests
 
+from hardware import compute_max_loaded_adapters
+
 logger = logging.getLogger(__name__)
 
 ADAPTER_MEMORY_PATH = Path(__file__).parent.parent / "database" / "adapter_memory.json"
 
 
 class LlamaClient:
-    MAX_LOADED_ADAPTERS = 2 # This is arbitrary, maybe can be scaled up
 
     def __init__(
         self,
@@ -32,6 +33,11 @@ class LlamaClient:
         self._convert_script = Path(convert_script) if convert_script else None
         self._server_process: Optional[subprocess.Popen] = None
         self._port = urlparse(self.base_url).port or 8080
+
+        self.MAX_LOADED_ADAPTERS = compute_max_loaded_adapters(
+            model_path=self._model_path,
+            adapters_dir=self._adapters_dir,
+        )
 
         # LRU order: index 0 = least recently used
         self._known_adapters: List[str] = []
