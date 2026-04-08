@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib # This library is for managing the parallel generation requests
 import json
 import logging
 import uuid
@@ -25,6 +26,59 @@ MAX_TOKENS_MIN = 1
 MAX_TOKENS_MAX = 500
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_TEMPERATURE = 0.7
+MAX_CONCURRENT_GENERATIONS = 4 # TODO: Like the 'MAX_LOADED_ADAPTERS' field in the LlamaClient.py file we want to make this dynamically adjusted to the machine that the program is being run on
+
+# This is a custom lock we defined for the following purpose:
+# We want to enable parallel generation requests, however there are limitations on that
+# Certain generation requests are going to trigger the model reloading to load up that adapter
+# So while we can allow parallel generation requests if the requests after the first active one target
+# adapters that are already loaded, we cannot allow concurrency for requests that would force
+# a reload in the middle of a generation process (sweep the current model out from under a generation request).
+# Thus we define a lock to help implement this lock. Additionally we define a maximum number of requests that
+# can be active at a given time as to not overwhelm the hardware. This is implemented in a semaphore.
+class AsyncRWLock:
+    def __init__(self, max_readers: int):
+        self._cond = asyncio.Condition()
+        self._readers = 0
+        self._writer_active = False
+        self._writer_waiting = 0
+        self._max_readers = max_readers
+
+    @contextlib.asynccontextmanager
+    async def reading(self):
+        async with self._cond:
+            # Check all the conditions for a read process
+            # We give writers priority over readers to prevent starvation
+            # NOTE: This means that a queued read could come to find that when it gets where it wanted to go
+            # the adapter it expected is gone
+            while self._writer_active or self._writer_waiting > 0 or self._readers >= self._max_readers:
+                await self._cond.wait()
+            self._readers += 1 # Increment to count against the MAX_CONCURRENT_GENERATIONS field / value
+        try:
+            yield
+        finally:
+            async with self._cond:
+                self._readers -= 1 # Decrement to count against the MAX_CONCURRENT_GENERATIONS field / value
+                self._cond.notify_all()
+
+    @contextlib.asynccontextmanager
+    async def writing(self):
+        async with self._cond:
+            self._writer_waiting += 1 # Increment to count against the MAX_CONCURRENT_GENERATIONS field / value
+            try:
+
+                while self._writer_active or self._readers > 0:
+                    await self._cond.wait()
+                self._writer_active = True
+            finally:
+                self._writer_waiting -= 1 # Decrement to count against the MAX_CONCURRENT_GENERATIONS field / value
+        try:
+            yield
+        finally:
+            async with self._cond:
+                self._writer_active = False
+                self._cond.notify_all()
+
 
 app = FastAPI(title="mosaicAI Middleware", version="1.0")
 
@@ -43,8 +97,18 @@ _llama = LlamaClient(
 # That was written in the json file
 _adapters: Dict[str, str] = {}
 
-# llama.cpp adapter selection is process-global; serialize generation calls.
-_generation_lock = asyncio.Lock()
+_rw_lock = AsyncRWLock(max_readers=MAX_CONCURRENT_GENERATIONS)
+_current_inference_adapter: Optional[str] = None  # adapter filename at scale 1.0, or None = base model
+
+# A 'read' request is when no state change is needed to the model
+# this is when the adapter requested is the one that is actively loaded (so no model reload is needed)
+# and currently active (so the scale of the model adapters reflects that)
+# We let such requests be parallel, but not otherwise.
+def _needs_write(adapter_filename: Optional[str]) -> bool:
+    if adapter_filename == _current_inference_adapter:
+        if adapter_filename is None or adapter_filename in _llama._active_adapters:
+            return False
+    return True
 
 
 @app.on_event("startup")
@@ -152,17 +216,14 @@ def _validate_adapter_dir(adapter_path: Path) -> Optional[str]:
 
 @app.post("/v1/generations", response_model=GenerationObject, responses={400: {"model": ErrorEnvelope}, 404: {"model": ErrorEnvelope}, 500: {"model": ErrorEnvelope}})
 async def create_generation(req: GenerationCreateRequest):
-    adapter_kwargs = {}
-    if req.adapter_id:
-        if req.adapter_id not in _adapters:
-            return _error_response(
-                http_status=404,
-                err_type="not_found_error",
-                code="ADAPTER_NOT_FOUND",
-                message="The specified adapter_id does not exist.",
-                request_id=req.request_id,
-            )
-        adapter_kwargs = {"adapter_filename": _adapters[req.adapter_id]}
+    if req.adapter_id and req.adapter_id not in _adapters:
+        return _error_response(
+            http_status=404,
+            err_type="not_found_error",
+            code="ADAPTER_NOT_FOUND",
+            message="The specified adapter_id does not exist.",
+            request_id=req.request_id,
+        )
 
     temperature = DEFAULT_TEMPERATURE
     max_tokens = DEFAULT_MAX_TOKENS
@@ -190,42 +251,60 @@ async def create_generation(req: GenerationCreateRequest):
             request_id=req.request_id,
         )
 
-    # adapter switching is global state, serialize
-    async with _generation_lock:
-        try:
-            output = _llama.chat(
-                message=req.message,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                min_p=min_p,
-                system_prompt=system_prompt,
-                **adapter_kwargs,
-            )
-        except Exception as e:
-            return _error_response(
-                http_status=500,
-                err_type="api_error",
-                code="INTERNAL_ERROR",
-                message=f"An unexpected error occurred on the backend server: {e}",
-                request_id=req.request_id,
-            )
+    adapter_filename = _adapters[req.adapter_id] if req.adapter_id else None
+    loop = asyncio.get_running_loop()
+
+    async def _run_inference():
+        return await loop.run_in_executor(None, lambda: _llama.chat(
+            message=req.message,
+            adapter_filename=None,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            min_p=min_p,
+            system_prompt=system_prompt,
+        ))
+
+    # Use run_in_executor to create thread pool execution so event loop doesnt need to block
+    try:
+        if _needs_write(adapter_filename):
+            async with _rw_lock.writing():
+                global _current_inference_adapter
+                if _needs_write(adapter_filename):
+                    # We do a zero argument lambda to avoid unpacking args
+                    # this if else is j about setting the adapter
+                    if adapter_filename:
+                        await loop.run_in_executor(None, _llama.use_adapter_by_name, adapter_filename)
+                    else:
+                        await loop.run_in_executor(None, _llama.use_base_only)
+                    _current_inference_adapter = adapter_filename
+                # here is where we generate an answer (for write processes)
+                output = await _run_inference()
+        else:
+            async with _rw_lock.reading():
+                # here is where we generate an answer (for read processes)
+                output = await _run_inference()
+    except Exception as e:
+        return _error_response(
+            http_status=500,
+            err_type="api_error",
+            code="INTERNAL_ERROR",
+            message=f"An unexpected error occurred on the backend server: {e}",
+            request_id=req.request_id,
+        )
 
     return GenerationObject(request_id=req.request_id, output=output)
 
 
 @app.post("/v1/generations/stream")
 async def create_generation_stream(req: GenerationCreateRequest):
-    adapter_kwargs = {}
-    if req.adapter_id:
-        if req.adapter_id not in _adapters:
-            return _error_response(
-                http_status=404,
-                err_type="not_found_error",
-                code="ADAPTER_NOT_FOUND",
-                message="The specified adapter_id does not exist.",
-                request_id=req.request_id,
-            )
-        adapter_kwargs = {"adapter_filename": _adapters[req.adapter_id]}
+    if req.adapter_id and req.adapter_id not in _adapters:
+        return _error_response(
+            http_status=404,
+            err_type="not_found_error",
+            code="ADAPTER_NOT_FOUND",
+            message="The specified adapter_id does not exist.",
+            request_id=req.request_id,
+        )
 
     temperature = DEFAULT_TEMPERATURE
     max_tokens = DEFAULT_MAX_TOKENS
@@ -253,20 +332,32 @@ async def create_generation_stream(req: GenerationCreateRequest):
             request_id=req.request_id,
         )
 
+    adapter_filename = _adapters[req.adapter_id] if req.adapter_id else None
+    needs_write = _needs_write(adapter_filename)
+
     async def stream():
+        global _current_inference_adapter
         sentinel = object()
-        loop = asyncio.get_event_loop()
-        # adapter switching --> hold lock for entire stream duration
-        async with _generation_lock:
-            gen = _llama.chat(
+        loop = asyncio.get_running_loop()
+
+        # Make sure to acquire appropriate lock
+        # See the non-stream version for a more verbose comment job (similar pattern)
+        async with (_rw_lock.writing() if needs_write else _rw_lock.reading()):
+            if needs_write and _needs_write(adapter_filename):
+                if adapter_filename:
+                    await loop.run_in_executor(None, _llama.use_adapter_by_name, adapter_filename)
+                else:
+                    await loop.run_in_executor(None, _llama.use_base_only)
+                _current_inference_adapter = adapter_filename
+            gen = await loop.run_in_executor(None, lambda: _llama.chat(
                 message=req.message,
+                adapter_filename=None,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 min_p=min_p,
                 system_prompt=system_prompt,
                 stream=True,
-                **adapter_kwargs,
-            )
+            ))
             while True:
                 chunk = await loop.run_in_executor(None, next, gen, sentinel)
                 if chunk is sentinel:
@@ -319,7 +410,7 @@ async def create_adapter(req: AdapterCreateRequest):
                 request_id=req.request_id,
             )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             gguf_path = await loop.run_in_executor(None, _llama.convert_adapter, adapter_path)
         except RuntimeError as e:
@@ -361,6 +452,10 @@ async def create_adapter(req: AdapterCreateRequest):
     return AdapterObject(adapter_id=adapter_id, adapter_filename=gguf_filename)
 
 
+# We also need to modify the deletion logic to accomodate parallel execution
+# If you want to delete an adapter that is not the currently active one, that is fine and can
+# be done in parallel with a generation request. What you cannot do is delete an adapter out from under
+# a process.
 @app.delete("/v1/adapters/{adapter_id}", response_model=AdapterObject, responses={404: {"model": ErrorEnvelope}, 500: {"model": ErrorEnvelope}})
 async def delete_adapter(adapter_id: str):
     if adapter_id not in _adapters:
@@ -372,8 +467,17 @@ async def delete_adapter(adapter_id: str):
             request_id=None,
         )
 
-    filename = _adapters.pop(adapter_id)
-    _llama.unregister_adapter(filename)
+    filename = _adapters[adapter_id]
+    if filename in _llama._active_adapters:
+        async with _rw_lock.writing():
+            _adapters.pop(adapter_id)
+            _llama.unregister_adapter(filename)
+            global _current_inference_adapter
+            if _current_inference_adapter == filename:
+                _current_inference_adapter = None
+    else:
+        _adapters.pop(adapter_id)
+        _llama.unregister_adapter(filename)
     return AdapterObject(adapter_id=adapter_id, adapter_filename=filename)
 
 

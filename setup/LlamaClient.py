@@ -224,6 +224,14 @@ class LlamaClient:
             response.raise_for_status()
         return response.json()
 
+    def use_base_only(self):
+        adapters_info = self.list_adapters()
+        if not adapters_info:
+            return
+        payload = [{"id": a["id"], "scale": 0.0} for a in adapters_info]
+        response = requests.post(f"{self.base_url}/lora-adapters", json=payload)
+        response.raise_for_status()
+
     def use_adapter_by_name(self, filename: str, scale: float = 1.0) -> int:
         # TODO: deprecate adapter_id in favor of this
         llama_id = self._ensure_adapter_active(filename)
