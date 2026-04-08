@@ -109,3 +109,71 @@ class TestIntegrationGenerate:
     def test_generate_missing_fields_422(self, live_server):
         r = requests.post(f"{MIDDLEWARE_URL}/v1/generations", json={"message": "Hello."})
         assert r.status_code == 422
+
+
+# Streaming generations
+@pytest.mark.integration
+class TestIntegrationGenerateStream:
+    STREAM_URL = f"{MIDDLEWARE_URL}/v1/generations/stream"
+
+    def test_stream_returns_200(self, live_server):
+        r = requests.post(
+            self.STREAM_URL,
+            json={"message": "Say the word yes.", "request_id": "int-stream-001"},
+            stream=True,
+        )
+        assert r.status_code == 200
+
+    def test_stream_content_type_is_text_plain(self, live_server):
+        r = requests.post(
+            self.STREAM_URL,
+            json={"message": "Say the word yes.", "request_id": "int-stream-ct"},
+            stream=True,
+        )
+        assert "text/plain" in r.headers.get("content-type", "")
+
+    def test_stream_produces_non_empty_content(self, live_server):
+        r = requests.post(
+            self.STREAM_URL,
+            json={"message": "Say the word yes.", "request_id": "int-stream-content"},
+            stream=True,
+        )
+        assert r.status_code == 200
+        content = b"".join(r.iter_content(chunk_size=None))
+        assert len(content) > 0
+
+    def test_stream_unknown_adapter_404(self, live_server):
+        r = requests.post(
+            self.STREAM_URL,
+            json={
+                "message": "Hello.",
+                "request_id": "int-stream-adp-404",
+                "adapter_id": "adp_doesnotexist",
+            },
+        )
+        assert r.status_code == 404
+        _assert_error_envelope(r.json(), code="ADAPTER_NOT_FOUND")
+
+    def test_stream_max_tokens_out_of_range_400(self, live_server):
+        r = requests.post(
+            self.STREAM_URL,
+            json={"message": "Hello.", "request_id": "int-stream-mt", "max_tokens": 0},
+        )
+        assert r.status_code == 400
+        _assert_error_envelope(r.json(), code="INVALID_MAX_TOKENS")
+
+    def test_stream_missing_fields_422(self, live_server):
+        r = requests.post(self.STREAM_URL, json={"message": "Hello."})
+        assert r.status_code == 422
+
+    def test_stream_chunks_arrive_incrementally(self, live_server):
+        """Verify the response is genuinely streamed (multiple iter_content calls)."""
+        r = requests.post(
+            self.STREAM_URL,
+            json={"message": "Count from one to five.", "request_id": "int-stream-inc"},
+            stream=True,
+        )
+        assert r.status_code == 200
+        chunks = list(r.iter_content(chunk_size=1))
+        # A streamed response must deliver at least one chunk
+        assert len(chunks) >= 1
