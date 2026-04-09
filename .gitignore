@@ -2,3 +2,4 @@ setup/load.config
 llama.cpp/
 llama.cpp/*
 **/*.pyc
+**/__pycache__/
