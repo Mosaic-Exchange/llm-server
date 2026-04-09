@@ -1,4 +1,4 @@
 setup/load.config
 llama.cpp/
 llama.cpp/*
-*.md
+**/*.pyc
