@@ -264,25 +264,20 @@ async def create_generation(req: GenerationCreateRequest):
             system_prompt=system_prompt,
         ))
 
-    # Use run_in_executor to create thread pool execution so event loop doesnt need to block
     try:
         if _needs_write(adapter_filename):
             async with _rw_lock.writing():
                 global _current_inference_adapter
                 if _needs_write(adapter_filename):
-                    # We do a zero argument lambda to avoid unpacking args
-                    # this if else is j about setting the adapter
                     if adapter_filename:
                         await loop.run_in_executor(None, _llama.use_adapter_by_name, adapter_filename)
                     else:
                         await loop.run_in_executor(None, _llama.use_base_only)
                     _current_inference_adapter = adapter_filename
-                # here is where we generate an answer (for write processes)
-                output = await _run_inference()
-        else:
-            async with _rw_lock.reading():
-                # here is where we generate an answer (for read processes)
-                output = await _run_inference()
+        # Write lock released before inference so concurrent readers aren't
+        # blocked for the full duration of a write-path request.
+        async with _rw_lock.reading():
+            output = await _run_inference()
     except Exception as e:
         return _error_response(
             http_status=500,
@@ -340,15 +335,17 @@ async def create_generation_stream(req: GenerationCreateRequest):
         sentinel = object()
         loop = asyncio.get_running_loop()
 
-        # Make sure to acquire appropriate lock
-        # See the non-stream version for a more verbose comment job (similar pattern)
-        async with (_rw_lock.writing() if needs_write else _rw_lock.reading()):
-            if needs_write and _needs_write(adapter_filename):
-                if adapter_filename:
-                    await loop.run_in_executor(None, _llama.use_adapter_by_name, adapter_filename)
-                else:
-                    await loop.run_in_executor(None, _llama.use_base_only)
-                _current_inference_adapter = adapter_filename
+        if needs_write:
+            async with _rw_lock.writing():
+                if _needs_write(adapter_filename):
+                    if adapter_filename:
+                        await loop.run_in_executor(None, _llama.use_adapter_by_name, adapter_filename)
+                    else:
+                        await loop.run_in_executor(None, _llama.use_base_only)
+                    _current_inference_adapter = adapter_filename
+        # Write lock released before inference so concurrent readers aren't
+        # blocked for the full duration of a write-path request.
+        async with _rw_lock.reading():
             gen = await loop.run_in_executor(None, lambda: _llama.chat(
                 message=req.message,
                 adapter_filename=None,
