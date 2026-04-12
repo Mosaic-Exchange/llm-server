@@ -1,14 +1,17 @@
 import shutil
 import sys
 from pathlib import Path
-
+import hardware
 import pytest
 
 _SETUP_DIR = str(Path(__file__).parent.parent / "setup")
 if _SETUP_DIR not in sys.path:
     sys.path.insert(0, _SETUP_DIR)
 
-import hardware
+
+_100MB = 100 * 1024 * 1024
+_2GB   = 2 * 1024 ** 3
+_512MB = 512 * 1024 * 1024
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 _MODEL_PATH   = _PROJECT_ROOT / "llama.cpp" / "models" / "llama-3.2-3b-instruct-q4_k_m.gguf"
@@ -31,9 +34,6 @@ class TestReadBuildType:
         result = hardware._read_build_type(tmp_path)
         assert result != ""
         assert isinstance(result, str)
-
-_2GB   = 2 * 1024 ** 3
-_512MB = 512 * 1024 * 1024
 
 
 class TestGetOsOverheadBytes:
@@ -85,8 +85,6 @@ class TestGetModelSizeBytes:
     def test_real_model_size(self):
         size = hardware.get_model_size_bytes(_MODEL_PATH)
         assert size > 1 * 1024 ** 3  # Llama 3.2 3B is well over 1 GB
-
-_100MB = 100 * 1024 * 1024
 
 
 class TestGetAdapterSizeEstimateBytes:

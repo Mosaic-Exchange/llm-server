@@ -1,9 +1,8 @@
 import logging
+import sys
 import platform
 import subprocess
-import sys
 from pathlib import Path
-
 import psutil
 
 logger = logging.getLogger("uvicorn")
@@ -18,19 +17,21 @@ _FALLBACK                    = 2
 
 def _infer_build_type_from_platform() -> str:
     # no load config
-    if sys.platform == "darwin":
+    current_platform = sys.platform
+    if current_platform == "darwin":
         if platform.machine() == "arm64":
             return "Metal (Apple Silicon GPU acceleration)"
         return "CPU with Accelerate framework"
-    if sys.platform.startswith("linux"):
+    elif current_platform.startswith("linux"):
         return "CPU with BLAS acceleration"
-    if sys.platform == "win32":
+    elif current_platform == "win32":
         return "CUDA (adjust if needed)"
-    return "CPU-only"
+    else:
+        return "CPU-only"
 
 
 def _read_build_type(setup_dir: Path) -> str:
-    # read from load config
+    #read from load config
     config_path = setup_dir / "load.config"
     try:
         for line in config_path.read_text().splitlines():
@@ -48,12 +49,12 @@ def _get_os_overhead_bytes(build_type: str) -> int:
     if "metal" in bt or "accelerate" in bt:
         return 2 * 1024 ** 3 #macOS
     if "cuda" in bt or "hip" in bt or "rocm" in bt or "vulkan" in bt or "blas" in bt:
-        return 512 * 1024 * 1024 # headless linux
+        return 512 * 1024 * 1024 #headless linux
     return 2 * 1024 ** 3 # in case it is unknown
 
 
 def get_total_ram_bytes(build_type: str) -> int:
-    # get total ram for computation based on the type of hardware from load.config
+    #get total ram for computation based on the type of hardware from load.config
     if "cuda" in build_type.lower():
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
@@ -70,6 +71,7 @@ def get_model_size_bytes(model_path) -> int:
 
 
 def get_adapter_size_estimate_bytes(adapters_dir) -> int:
+    #make average of adapters if they exist
     if adapters_dir is None:
         return _ADAPTER_SIZE_ESTIMATE_BYTES
     p = Path(adapters_dir)
@@ -83,7 +85,7 @@ def get_adapter_size_estimate_bytes(adapters_dir) -> int:
 
 
 def compute_max_loaded_adapters(model_path, adapters_dir=None, setup_dir=None) -> int:
-    # apply formula
+    #apply formula and compute
     try:
         _setup_dir   = Path(setup_dir) if setup_dir else Path(__file__).parent
         build_type   = _read_build_type(_setup_dir)

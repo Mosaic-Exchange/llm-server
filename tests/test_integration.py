@@ -4,17 +4,14 @@ import requests
 MIDDLEWARE_URL = "http://127.0.0.1:4000"
 
 
-# Session fixture — skip everything if the server isn't up
 @pytest.fixture(scope="session")
-def live_server():
-    """Skip the entire suite if the middleware is not reachable."""
+def live_server(): #skip suite if server not running
     try:
         r = requests.get(f"{MIDDLEWARE_URL}/health", timeout=3)
         r.raise_for_status()
     except Exception as e:
         pytest.skip(f"Middleware not reachable at {MIDDLEWARE_URL}: {e}")
 
-# Helpers
 def _assert_error_envelope(body, *, code=None):
     assert "error" in body
     err = body["error"]
@@ -24,8 +21,7 @@ def _assert_error_envelope(body, *, code=None):
         assert err["code"] == code
 
 
-# Health
-@pytest.mark.integration
+@pytest.mark.integration #health checks
 class TestIntegrationHealth:
     def test_middleware_ok(self, live_server):
         r = requests.get(f"{MIDDLEWARE_URL}/health")
@@ -35,15 +31,14 @@ class TestIntegrationHealth:
     def test_llama_server_reachable(self, live_server):
         r = requests.get(f"{MIDDLEWARE_URL}/health")
         assert r.json()["llama_server"] == "ok", (
-            "llama.cpp server is not running, start it before running integration tests"
+            "need to start llama.cpp server before running tests"
         )
 
     def test_adapters_registered_is_int(self, live_server):
         r = requests.get(f"{MIDDLEWARE_URL}/health")
         assert isinstance(r.json()["adapters_registered"], int)
 
-# Adapters
-@pytest.mark.integration
+@pytest.mark.integration #adapter tests
 class TestIntegrationAdapters:
     def test_list_returns_list_object(self, live_server):
         r = requests.get(f"{MIDDLEWARE_URL}/v1/adapters")
@@ -65,13 +60,12 @@ class TestIntegrationAdapters:
         assert r.status_code == 404
         _assert_error_envelope(r.json(), code="ADAPTER_DIR_NOT_FOUND")
 
-# Generations
-@pytest.mark.integration
+@pytest.mark.integration #text generation tests
 class TestIntegrationGenerate:
     def test_generate_returns_response(self, live_server):
         r = requests.post(
             f"{MIDDLEWARE_URL}/v1/generations",
-            json={"message": "Say the word yes.", "request_id": "int-gen-001"},
+            json={"message": "Say the word yes", "request_id": "int-gen-001"},
         )
         assert r.status_code == 200
         body = r.json()
@@ -111,8 +105,7 @@ class TestIntegrationGenerate:
         assert r.status_code == 422
 
 
-# Streaming generations
-@pytest.mark.integration
+@pytest.mark.integration #test streaming generation
 class TestIntegrationGenerateStream:
     STREAM_URL = f"{MIDDLEWARE_URL}/v1/generations/stream"
 
@@ -135,7 +128,7 @@ class TestIntegrationGenerateStream:
     def test_stream_produces_non_empty_content(self, live_server):
         r = requests.post(
             self.STREAM_URL,
-            json={"message": "Say the word yes.", "request_id": "int-stream-content"},
+            json={"message": "Say the word yes twice", "request_id": "int-stream-content"},
             stream=True,
         )
         assert r.status_code == 200
@@ -146,7 +139,7 @@ class TestIntegrationGenerateStream:
         r = requests.post(
             self.STREAM_URL,
             json={
-                "message": "Hello.",
+                "message": "Hello",
                 "request_id": "int-stream-adp-404",
                 "adapter_id": "adp_doesnotexist",
             },
@@ -157,7 +150,7 @@ class TestIntegrationGenerateStream:
     def test_stream_max_tokens_out_of_range_400(self, live_server):
         r = requests.post(
             self.STREAM_URL,
-            json={"message": "Hello.", "request_id": "int-stream-mt", "max_tokens": 0},
+            json={"message": "Hello", "request_id": "int-stream-mt", "max_tokens": 0},
         )
         assert r.status_code == 400
         _assert_error_envelope(r.json(), code="INVALID_MAX_TOKENS")
@@ -166,14 +159,12 @@ class TestIntegrationGenerateStream:
         r = requests.post(self.STREAM_URL, json={"message": "Hello."})
         assert r.status_code == 422
 
-    def test_stream_chunks_arrive_incrementally(self, live_server):
-        """Verify the response is genuinely streamed (multiple iter_content calls)."""
+    def test_stream_chunks_arrive_incrementally(self, live_server): #check that the response comes through multiple iter calls
         r = requests.post(
             self.STREAM_URL,
-            json={"message": "Count from one to five.", "request_id": "int-stream-inc"},
+            json={"message": "Count from one to five", "request_id": "int-stream-inc"},
             stream=True,
         )
         assert r.status_code == 200
         chunks = list(r.iter_content(chunk_size=1))
-        # A streamed response must deliver at least one chunk
-        assert len(chunks) >= 1
+        assert len(chunks) >= 1 #need at least one chunk for it to be streamed

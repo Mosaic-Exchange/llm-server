@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 from unittest.mock import patch
-
 import pytest
 from starlette.testclient import TestClient
 
@@ -15,35 +14,29 @@ def pytest_addoption(parser):
         "--integration",
         action="store_true",
         default=False,
-        help="Run integration tests against a live server (requires servers on :4000 and :8080)",
+        help="Run integration tests against the live servers running on 4000 and 8080",
     )
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "integration: mark test as requiring live servers")
-    """patch LlamaClient before middleware_server is imported during collection"""
-    if "middleware_server" not in sys.modules:
+    if "middleware_server" not in sys.modules: #if server not running
         patch("LlamaClient.LlamaClient", autospec=True).start()
 
 
 def pytest_collection_modifyitems(config, items):
     if not config.getoption("--integration"):
-        skip = pytest.mark.skip(reason="pass --integration to run against live servers")
+        skip = pytest.mark.skip(reason="pass integration to run against live servers")
         for item in items:
             if item.get_closest_marker("integration"):
                 item.add_marker(skip)
 
 
 @pytest.fixture(scope="module")
-def client():
-    """configures mock defaults before startup event fires"""
+def client(): #make mock defaults
     import middleware_server
-
-    # _known_adapters is iterated in the startup event; must be an empty list.
-    middleware_server._llama._known_adapters = []
-    # Keep shutdown handler a no-op.
+    middleware_server._llama._known_adapters = [] #_known_adapters is iterated at startup
     middleware_server._llama._server_process = None
-    # Safe defaults so tests that don't use mock_llama still get sensible behaviour.
     middleware_server._llama.chat.side_effect = None
     middleware_server._llama.chat.return_value = "mocked response"
     middleware_server._llama.get_system_prompt.return_value = None
@@ -55,7 +48,6 @@ def client():
 
 @pytest.fixture
 def mock_llama():
-    """return the module-level _llama MagicMock with a clean slate for this test"""
     import middleware_server
 
     m = middleware_server._llama
@@ -80,10 +72,8 @@ def mock_llama():
 
 
 @pytest.fixture(autouse=True)
-def clean_adapters():
-    """Snapshot and restore the adapter registry around every test """
+def clean_adapters(): #restore adapter registry at every run
     import middleware_server
-
     snapshot = dict(middleware_server._adapters)
     yield
     middleware_server._adapters.clear()
@@ -91,8 +81,7 @@ def clean_adapters():
 
 
 @pytest.fixture
-def tmp_adapters_dir(tmp_path, monkeypatch):
-    """redirect LLAMA_ADAPTERS_DIR to a temporary directory for this test """
+def tmp_adapters_dir(tmp_path, monkeypatch): # redirect to temp dir
     import middleware_server
 
     monkeypatch.setattr(middleware_server, "LLAMA_ADAPTERS_DIR", str(tmp_path))
