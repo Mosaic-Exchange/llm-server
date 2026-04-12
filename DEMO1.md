@@ -65,7 +65,35 @@ curl -X POST http://127.0.0.1:4000/v1/generations \
   -d '{"message": "How are you?", "request_id": "test-1", "adapter_id": "adp_ad28b0db0dfe"}'
 ```
 
-## 6. View Adapters
+## 6. Parallel Gordon Stream Query
+
+```bash
+curl -N -X POST http://127.0.0.1:4000/v1/generations/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "write me a long poem", "request_id": "test-1", "adapter_id": "adp_ad28b0db0dfe"}'
+```
+
+```bash
+curl -N -X POST http://127.0.0.1:4000/v1/generations/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is your favorite turkey dish?", "request_id": "test-1", "adapter_id": "adp_ad28b0db0dfe"}'
+```
+
+## 6. Parallel Gordon / Ella Stream Query
+
+```bash
+curl -N -X POST http://127.0.0.1:4000/v1/generations/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "write me a long poem", "request_id": "test-1", "adapter_id": "adp_ad28b0db0dfe"}'
+```
+
+```bash
+curl -N -X POST http://127.0.0.1:4000/v1/generations/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is your favorite turkey dish?", "request_id": "test-1", "adapter_id": "adp_2a2acd1ecbce"}'
+```
+
+## 7. View Adapters
 ```bash
 curl http://127.0.0.1:4000/v1/adapters
 ```
