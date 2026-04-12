@@ -3,3 +3,4 @@ llama.cpp/
 llama.cpp/*
 *.md
 database/
+__pycache__/
