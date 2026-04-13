@@ -4,7 +4,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Optional, List
-import glob
+from gguf.gguf_reader import GGUFReader
 
 
 # Its responsibilities are to return either true or false --> True if the adapter is (after the function processes)
@@ -61,7 +61,13 @@ def _get_files_by_extension(dir_path: Path, extension: str) -> List[Path]:
         if p.is_file() and p.suffix == extension
     ]
 
-def _handle_gguf_case():
+# This function is all about checking if the .gguf file that we found in the uploaded directory
+# is actually what we want (a compatible file)
+def _handle_gguf_case(dir_path: Path, filename) -> Optional[bool]:
+    # The first check we do is on the file size. If the file size is greater than the size of the
+    # model itself, then we can assume something is wrong (probably that the indicated file is not
+    # an adapter, but maybe a
+
     return True
 
 def _handle_safetensors_case():
