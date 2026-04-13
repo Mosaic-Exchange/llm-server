@@ -1,20 +1,24 @@
 # This file is going to define an object that performs all validation and transformation (and rejection / cleanup)
 # operations on the uploaded adapter files.
+import json
 import os
 import shutil
 from pathlib import Path
 from typing import Optional, List, Any
 from gguf.gguf_reader import GGUFReader
+from safetensors import safe_open
 
 from constants import (
     LLAMA_MODEL_PATH,
     LLAMA_ADAPTERS_DIR,
-    EXPECTED_ARCH
+    EXPECTED_ARCH,
+    LLAMA_VALID_MODULES
 )
 
 from backend_errors import (
     InvalidGGUFUploadError,
-    AdapterUploadError
+    AdapterUploadError,
+    InvalidSafetensorsUploadError
 )
 
 
@@ -56,8 +60,16 @@ def validate_adapter(
 
     # Case #2: There is a .safetensor file in the specified directory
     safetensors_files = _get_files_by_extension(adapter_path, ".safetensors")
-    if len(safetensors_files) != 0:
-        return _handle_safetensors_case()
+
+    # Though 'sharded' LoRA adapeters (LoRA adapters that are so big they need to be split across multiple weight files)
+    # are possible, we do not consider them here. This is because
+    #   i. multiple weight files probably is an indication that this is a model, not an adapter (much more common)
+    #   ii. we are running locally, loading an adapter that big would kill us on RAM consumption
+    #   iii. Adding an adapter that huge onto a tiny 3B model like ours is an absurd use case
+    if len(safetensors_files) > 1:
+        raise AdapterUploadError(adapter_path, "Sharded adapters (multiple .safetensors files) are not supported.")
+    if len(safetensors_files) == 1:
+        return _handle_safetensors_case(adapter_path, safetensors_files[0])
 
     # Case #3: There is neither a .gguf nor is there a .safetensor file in the directory
     # In this case trash it all (we know there is at least a directory, empty or with garbage)
@@ -74,7 +86,8 @@ def _get_files_by_extension(dir_path: Path, extension: str) -> List[Path]:
     ]
 
 # This function is all about checking if the .gguf file that we found in the uploaded directory
-# is actually what we want (a compatible file)
+# is actually what we want (a compatible file). Note that this strategy does not GUARANTEE anything,
+# it is just a reasonable set of barriers to overcome.
 def _handle_gguf_case(dir_path: Path, filename: Path) -> Optional[bool]:
     gguf_path = dir_path / filename
 
@@ -163,7 +176,111 @@ def _field_value(reader: GGUFReader, key: str, default: Any = None) -> Any:
     except Exception:
         return default
 
-def _handle_safetensors_case():
+def _handle_safetensors_case(dir_path: Path, weight_file: Path) -> Optional[bool]:
+    # CHECK 1: Requisite files
+    # To be a valid PEFT style LoRA adapter we need an adapter_config.json file along with the weight file(s)
+    # This file is pretty universally named adapter_config.json, so it's safe for us to assume that that is it's name.
+    # Moreover, if that is not its name it is a reasonable indication something is wrong.
+    config_path = dir_path / "adapter_config.json"
+    if not config_path.exists():
+        raise InvalidSafetensorsUploadError(dir_path, "Missing required file: adapter_config.json")
+
+    # CHECK 2: The weight file is a valid safetensors file and actually contains LoRA weights.
+    # We use the library to parse the header (no tensor data is loaded into memory).
+    # Tensor names follow the PEFT pattern:
+    #   base_model.model...{module}.lora_A.weight
+    #   base_model.model...{module}.lora_B.weight
+    # The presence of lora_A/lora_B in the tensor names is strong evidence of LoRA
+    try:
+        with safe_open(str(weight_file), framework="numpy") as f:
+            tensor_names = list(f.keys())
+    except Exception as e:
+        # If the library can't parse it its an imposter .safetensors file (or at the least corrupted and not usable)
+        raise InvalidSafetensorsUploadError(weight_file, f"Could not parse file: {e}") from e
+
+    lora_a_keys = [k for k in tensor_names if "lora_A" in k]
+    lora_b_keys = [k for k in tensor_names if "lora_B" in k]
+    if not lora_a_keys or not lora_b_keys:
+        raise InvalidSafetensorsUploadError(
+            weight_file,
+            "No lora_A/B tensors found: this doesn't appear to be a LoRA adapter.",
+        )
+
+    # CHECK #3: Check module names
+    # Extract the module names actually present in the weights (e.g. q_proj, v_proj) and
+    # validate them against the known Llama architecture - more reliable than trusting the config.
+    # Tensor names look like: base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight
+    modules_in_weights = set()
+    for key in lora_a_keys: # Background knowledge note: lora_a and lora_b are always going to be the same wrt to layer they cover, its a 1 2 punch
+        parts = key.split(".")
+        lora_idx = parts.index("lora_A")
+        if lora_idx > 0:
+            modules_in_weights.add(parts[lora_idx - 1])
+
+    # By looking at the layer names we can do a module check on the safetensor
+    unknown = modules_in_weights - LLAMA_VALID_MODULES
+    if unknown:
+        raise InvalidSafetensorsUploadError(
+            weight_file,
+            f"Weights target modules not present in Llama architecture: {', '.join(sorted(unknown))}",
+        )
+
+    # CHECK 4: Config is valid JSON and contains all required PEFT fields
+    # Check4.1 - Is the .json valid?
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except json.JSONDecodeError as e:
+        raise InvalidSafetensorsUploadError(config_path, f"adapter_config.json is not valid JSON: {e}") from e
+
+    # Check4.2 - Does the .json have the necessary fields
+    required_fields = {"r", "lora_alpha", "target_modules", "base_model_name_or_path"}
+    missing = required_fields - set(config.keys())
+    if missing:
+        raise InvalidSafetensorsUploadError(
+            config_path,
+            f"adapter_config.json is missing required fields: {', '.join(sorted(missing))}",
+        )
+
+    # Check4.3 - Does the config have an invalid rank parameter or alpha val
+    rank = config.get("r")
+    if not isinstance(rank, int) or rank <= 0:
+        raise InvalidSafetensorsUploadError(config_path, f"Invalid LoRA rank 'r': {rank!r}. Must be a positive integer.")
+
+    # alpha=0 means the adapter's contribution is scaled to zero - it has no effect on output
+    alpha = config.get("lora_alpha")
+    if not isinstance(alpha, (int, float)) or alpha <= 0:
+        raise InvalidSafetensorsUploadError(config_path, f"Invalid lora_alpha: {alpha!r}. Must be a positive number.")
+
+    # CHECK 5: Rank consistency
+    # A lora_A tensor has shape [r, in_features]. We load one sample tensor and confirm its first
+    # dimension matches the rank declared in adapter_config.json. A mismatch means the config and
+    # the weights are out of sync, meaning a likely corrupt or mismatched upload.
+    # Note: this is a partial geometry check only. Full geometric compatibility (i.e. whether
+    # in_features aligns with the base model's projection dimensions) cannot be verified here
+    # without loading the model itself (too expensive, rather handle the crash).
+    try:
+        with safe_open(str(weight_file), framework="numpy") as f:
+            sample = f.get_tensor(lora_a_keys[0])
+        if sample.shape[0] != rank:
+            raise InvalidSafetensorsUploadError(
+                weight_file,
+                f"Declared rank r={rank} does not match actual tensor rank {sample.shape[0]}.",
+            )
+    except InvalidSafetensorsUploadError:
+        raise
+    except Exception:
+        pass  # if shape check fails for any other reason, let conversion catch it
+
+    # CHECK 6: The adapter is compatible with the base model
+    # base_model_name_or_path is set by the trainer and encodes what model the adapter was trained on
+    base_model = str(config.get("base_model_name_or_path", ""))
+    if "llama" not in base_model.lower(): # TODO: Do non-instruct adapters work with instruct?
+        raise InvalidSafetensorsUploadError(
+            config_path,
+            f"Adapter base model '{base_model}' does not appear to be a Llama model.",
+        )
+
     return True
 
 def _garbage_collect(

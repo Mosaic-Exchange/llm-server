@@ -17,10 +17,15 @@ class AdapterUploadError(Exception):
         self.message = f"Adapter upload from '{adapter_path}' failed: {description}."
         super().__init__(self.message)
 
-class InvalidGGUFUploadError(Exception):
+class InvalidSafetensorsUploadError(AdapterUploadError):
+    def __init__(self, filepath: Path, description: str):
+        self.message = f"The .safetensors style upload from '{filepath}' was invalid: {description}."
+        super().__init__(filepath, self.message)
+
+class InvalidGGUFUploadError(AdapterUploadError):
     def __init__(self, filepath: Path, description: str):
         self.message = f"The .gguf file at '{filepath}' was invalid: {description}."
-        super().__init__(self.message)
+        super().__init__(filepath, self.message)
 
 
 # Adapter does not exist --> for when people request the usage of an adapter that does not exist

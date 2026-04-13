@@ -17,3 +17,11 @@ DEFAULT_TEMPERATURE = 0.7
 MAX_CONCURRENT_GENERATIONS = 4
 
 EXPECTED_ARCH = "llama"
+
+# Standard LoRA target modules for Llama, adapters involving anything outside
+# this set were probably trained on a different model family
+LLAMA_VALID_MODULES = {
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "gate_proj", "up_proj", "down_proj",
+    "lm_head", "embed_tokens",
+}
