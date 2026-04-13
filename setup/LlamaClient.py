@@ -181,7 +181,6 @@ class LlamaClient:
 
         return self._active_adapters.index(filename)
 
-
     def _ensure_server_running(self):
         """
         This function serves to make sure that the background server is running.
@@ -212,6 +211,14 @@ class LlamaClient:
         logger.info("llama-server not detected - starting it now.")
         self._reload_server()
 
+    def _server_shutdown(self):
+        if self._server_process and self._server_process.poll() is None:
+            self._server_process.terminate()
+            try:
+                self._server_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._server_process.kill()
+
     # This gets called a lot more than the name might imply. Every time the selection of active adapters changes, for
     # any reason, the server needs to be reloaded. Yes, we implement hotswapping between active adapters using scaling
     # factor modulations, but in order to change what adapters are active the whole model must be torn down and
@@ -219,17 +226,7 @@ class LlamaClient:
     # In order to do the reload the server binary from llama.cpp is re-executed (with the appropriate 'active' adapter
     # list, as recorded in the instance variable).
     def _reload_server(self):
-        if not self._server_binary or not self._model_path:
-            raise RuntimeError(
-                "server_binary and model_path must be provided to LlamaClient to support adapter reload."
-            )
-
-        if self._server_process and self._server_process.poll() is None:
-            self._server_process.terminate()
-            try:
-                self._server_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._server_process.kill()
+        self._server_shutdown()
 
         cmd = [
             self._server_binary,
