@@ -3,8 +3,19 @@
 import os
 import shutil
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Any
 from gguf.gguf_reader import GGUFReader
+
+from constants import (
+    LLAMA_MODEL_PATH,
+    LLAMA_ADAPTERS_DIR,
+    EXPECTED_ARCH
+)
+
+from backend_errors import (
+    InvalidGGUFUploadError,
+    AdapterUploadError
+)
 
 
 # Its responsibilities are to return either true or false --> True if the adapter is (after the function processes)
@@ -27,20 +38,21 @@ from gguf.gguf_reader import GGUFReader
 # NC6 --> Random files in the specified filepath (No adapter)
 
 def validate_adapter(
-        adapter_dir: Path,
         adapter_path: str
 ) -> Optional[bool]:
 
     # Check if specified filepath exists (NC1)
-    adapter_path = Path(adapter_dir) / adapter_path
+    adapter_path = Path(LLAMA_ADAPTERS_DIR) / adapter_path
     if not adapter_path.exists() or not adapter_path.is_dir():
         raise FileNotFoundError(f"Adapter path '{adapter_path}' was not found.")
 
     # Case #1: There is a .gguf file in the specified directory
     # Collect all files ending with .gguf
     gguf_files = _get_files_by_extension(adapter_path, ".gguf")
-    if len(gguf_files) != 0:
-        return _handle_gguf_case() # TODO: What if someone uploads an invalid .gguf with a valid safetensor?
+    if len(gguf_files) == 1:
+        return _handle_gguf_case(adapter_path, gguf_files[0])
+    elif len(gguf_files) > 1:
+        raise AdapterUploadError(adapter_path, f"Multiple gguf files: {gguf_files}")
 
     # Case #2: There is a .safetensor file in the specified directory
     safetensors_files = _get_files_by_extension(adapter_path, ".safetensors")
@@ -63,12 +75,93 @@ def _get_files_by_extension(dir_path: Path, extension: str) -> List[Path]:
 
 # This function is all about checking if the .gguf file that we found in the uploaded directory
 # is actually what we want (a compatible file)
-def _handle_gguf_case(dir_path: Path, filename) -> Optional[bool]:
+def _handle_gguf_case(dir_path: Path, filename: Path) -> Optional[bool]:
+    gguf_path = dir_path / filename
+
+    # CHECK 1: File Size
     # The first check we do is on the file size. If the file size is greater than the size of the
     # model itself, then we can assume something is wrong (probably that the indicated file is not
-    # an adapter, but maybe a
+    # an adapter, but maybe a full model). And even if it doesn't, it would be too memory heavy
+    if gguf_path.stat().st_size > Path(LLAMA_MODEL_PATH).stat().st_size:
+        raise InvalidGGUFUploadError(gguf_path, "GGUF file too large.")
+
+    # CHECK #2: Magic Numbers
+    # .gguf files have the a little signature at the beginning. So we can read the first few bytes
+    # of the file. If the bytes don't align with what they should be for a .gguf file then we know
+    # we have an imposter file
+    with open(gguf_path, "rb") as f:
+        magic = f.read(4)
+
+    if magic != b"GGUF":
+        raise InvalidGGUFUploadError(gguf_path, "Missing Magic Number.")
+
+    # CHECK #3: Try Parsing
+    # llama.cpp defines a GGUFReader to try and read gguf files. If this reader fails, that means that
+    # mounting it would too
+    try:
+        reader = GGUFReader(str(gguf_path))
+    except Exception as e:
+        raise InvalidGGUFUploadError(gguf_path, f"GGUFReader() failed to parse: {e}") from e
+
+    # CHECK #4: Metadata evaluation
+    # GGUF files contain plenty of metadata. At this point in the program flow we know we have a valid
+    # gguf file. Now we need to find out if that file is a LoRA adapter, and if that adapter is compatible
+    arch = _field_value(reader, "general.architecture")
+    if _stringify(arch).lower() != EXPECTED_ARCH:
+        raise InvalidGGUFUploadError(gguf_path, "Invalid architecture.")
+
+    adapter_type = _field_value(reader, "adapter.type")
+    if _stringify(adapter_type).lower() != "lora":
+        raise InvalidGGUFUploadError(gguf_path, "Invalid adapter type.")
+
+
+    # CHECK #5: Read tensors of the gguf
+    # Using the reader we can collect the tensors and see if they match up with what we would
+    # expect. This means that we are looking for common lora keywords (e.g. lora) that would be
+    # associated with LoRA weights. We also check if there are too many weights that DON'T have
+    # that lora association, as that too could point to it being a full model.
+    names = [t.name for t in reader.tensors]
+
+    lora_like = [
+        n for n in names
+        if ".lora_a" in n.lower()
+           or ".lora_b" in n.lower()
+           or "lora_a" in n.lower()
+           or "lora_b" in n.lower()
+    ]
+
+    if len(lora_like) == 0:
+        raise InvalidGGUFUploadError(gguf_path, "No lora like tensors.")
+
+    regular_weight_like = [
+        n for n in names
+        if n.endswith(".weight")
+           and "lora" not in n.lower()
+    ]
+
+    if len(regular_weight_like) >= 100:
+        raise InvalidGGUFUploadError(gguf_path, "Too many regular weights. Looks model like.")
 
     return True
+
+def _stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="replace")
+        except Exception:
+            return repr(value)
+    return str(value)
+
+def _field_value(reader: GGUFReader, key: str, default: Any = None) -> Any:
+    field = reader.get_field(key)
+    if field is None:
+        return default
+    try:
+        return field.contents()
+    except Exception:
+        return default
 
 def _handle_safetensors_case():
     return True
@@ -121,4 +214,5 @@ def _garbage_collect(
 
     return True
 
-
+if __name__ == "__main__":
+    print("hello")

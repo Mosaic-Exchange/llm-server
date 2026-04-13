@@ -15,3 +15,5 @@ DEFAULT_TEMPERATURE = 0.7
 
 # TODO: like MAX_LOADED_ADAPTERS in LlamaClient.py, this should be dynamically adjusted based on hardware
 MAX_CONCURRENT_GENERATIONS = 4
+
+EXPECTED_ARCH = "llama"
