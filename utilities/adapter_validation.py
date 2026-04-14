@@ -1,8 +1,9 @@
 # This file is going to define an object that performs all validation and transformation (and rejection / cleanup)
 # operations on the uploaded adapter files.
 import json
-import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional, List, Any
 from gguf.gguf_reader import GGUFReader
@@ -11,6 +12,8 @@ from safetensors import safe_open
 from constants import (
     LLAMA_MODEL_PATH,
     LLAMA_ADAPTERS_DIR,
+    LLAMA_CONVERT_SCRIPT,
+    LLAMA_BASE_CONFIG,
     EXPECTED_ARCH,
     LLAMA_VALID_MODULES
 )
@@ -29,9 +32,7 @@ from backend_errors import (
 # PC1 --> A valid .gguf adapter file is placed into the filepath
 # PC2 --> A valid .gguf adapter file is placed into the filepath (plus extra files, e.g. system prompt, etc)
 # PC3 --> A valid .safetensor PEFT version of adapters is placed into the filepath
-# PC4 --> A valid .gguf that is the wrong quantization
-# PC5 --> A valid .safetensor that is the wrong quantization
-# PC6 --> Any of PC1-PC3 plus some detritus files
+# PC4 --> Any of PC1-PC3 plus some detritus files
 
 # Negative Cases
 # NC1 --> The specified filepath does not exist
@@ -75,6 +76,8 @@ def validate_adapter(
     # In this case trash it all (we know there is at least a directory, empty or with garbage)
     _garbage_collect(
         adapter_path=adapter_path,
+        gc_list=None,
+        trash=None
     )
 
     return False
@@ -155,7 +158,14 @@ def _handle_gguf_case(dir_path: Path, filename: Path) -> Optional[bool]:
     if len(regular_weight_like) >= 100:
         raise InvalidGGUFUploadError(gguf_path, "Too many regular weights. Looks model like.")
 
-    return True
+    # Normalize filename: the .gguf file must be named after its parent directory (e.g. ella/ella.gguf)
+    # so the rest of the system can locate it predictably. Rename if it doesn't already match.
+    expected_name = dir_path.name + ".gguf"
+    if gguf_path.name != expected_name:
+        gguf_path.rename(dir_path / expected_name)
+
+    # Do final clean up
+    return _final_clean_up(adapter_dir=dir_path)
 
 def _stringify(value: Any) -> str:
     if value is None:
@@ -281,11 +291,77 @@ def _handle_safetensors_case(dir_path: Path, weight_file: Path) -> Optional[bool
             f"Adapter base model '{base_model}' does not appear to be a Llama model.",
         )
 
-    return True
+    # Then if all checks get passed we can do the conversion to .gguf format
+    convert_adapter(dir_path)
+
+    # Do final clean up
+    return _final_clean_up(adapter_dir=dir_path)
+
+# Most adapters are stored (usually on HuggingFace) in .safetensor format. However, the llama.cpp backend that we
+# are running locally operates on a format called .gguf. Since we want to make our application accessible to a
+# wider array of people, we choose to accept .safetensor formatted LoRA adapter files. This means that we have
+# to convert said files. Luckily, the llama.cpp open source project contains a script that does this conversion.
+# So in this function we call that script (and properly parametrize it) so that the adapter can be used.
+# The base config provides the model architecture metadata the script needs to correctly shape the output weights.
+def convert_adapter(adapter_dir: Path) -> Path:
+    outfile = adapter_dir / f"{adapter_dir.name}.gguf"
+    cmd = [
+        sys.executable,
+        str(LLAMA_CONVERT_SCRIPT),
+        "--base", str(LLAMA_BASE_CONFIG),
+        "--outfile", str(outfile),
+        "--outtype", "q8_0",
+        str(adapter_dir),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout)
+    return outfile
+
+# Uploads are allowed to submit parameter suggestion requests (through a .json) and system prompt requests
+# through a .txt file. We expect this to be submitted in the form of a text field / a form, and to have the
+# files shaped by us. Therefore, we (perhaps naively) expect that there will be no issues with these files.
+# TODO: Is this naive?
+# But, we still do need to do some cleanup in the case that there is any detritus in the folder
+def _final_clean_up(adapter_dir: Path) -> bool:
+    keep_list = [adapter_dir / f"{adapter_dir.name}.gguf"]
+
+    # We do check if they are empty, but that is it
+    param_suggestion_path = adapter_dir / f"parameter_suggestions.json"
+    system_prompt_path = adapter_dir / f"system_prompt.txt"
+
+    # Check it exists, is a file, and is more than 0 bytes
+    if param_suggestion_path.exists() and \
+        param_suggestion_path.is_file() and \
+        param_suggestion_path.stat().st_size > 0:
+
+        # Then try and open it (and check if it has any suggestions even)
+        try:
+            with param_suggestion_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data not in ({}, []):
+                keep_list.append(param_suggestion_path)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if system_prompt_path.exists() and \
+        system_prompt_path.is_file() and \
+        system_prompt_path.stat().st_size > 0 and \
+        system_prompt_path.suffix.lower() == ".txt":
+
+        try:
+            with system_prompt_path.open("r", encoding="utf-8") as f:
+                if bool(f.read().strip()):
+                    keep_list.append(system_prompt_path)
+        except OSError:
+            pass
+
+
+    return _garbage_collect(adapter_dir, keep_list, False)
 
 def _garbage_collect(
     adapter_path: Path,
-    gc_list: Optional[List[str]],
+    gc_list: Optional[List[Path]],
     trash: Optional[bool],  # True: delete listed, False: delete everything NOT listed
 ) -> bool:
     resolved_adapter = adapter_path.resolve()
@@ -295,14 +371,14 @@ def _garbage_collect(
         shutil.rmtree(resolved_adapter)
         return True
 
-    names_set = set(gc_list)
+    names_set = {p.resolve() for p in gc_list}
 
     # Determine candidates
     if trash:
-        # delete only listed names
-        candidates = [resolved_adapter / name for name in names_set]
+        # delete only listed paths
+        candidates = list(names_set)
     else:
-        # delete everything except listed names
+        # delete everything except listed paths
         candidates = list(resolved_adapter.iterdir())
 
     for target in candidates:
@@ -313,10 +389,8 @@ def _garbage_collect(
             if resolved_target != resolved_adapter and resolved_adapter not in resolved_target.parents:
                 return False
 
-            name = target.name
-
             # Decide deletion behavior
-            should_delete = name in names_set if trash else name not in names_set
+            should_delete = resolved_target in names_set if trash else resolved_target not in names_set
 
             if not should_delete or not resolved_target.exists():
                 continue

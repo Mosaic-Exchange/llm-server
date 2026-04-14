@@ -7,6 +7,7 @@ LLAMA_SERVER_BINARY = str(_PROJECT_ROOT / "llama.cpp" / "llama-server")
 LLAMA_MODEL_PATH = str(_PROJECT_ROOT / "llama.cpp" / "models" / "llama-3.2-3b-instruct-q4_k_m.gguf")
 LLAMA_ADAPTERS_DIR = str(_PROJECT_ROOT / "adapters")
 LLAMA_CONVERT_SCRIPT = str(_PROJECT_ROOT / "utilities" / "convert_lora_to_gguf.py")
+LLAMA_BASE_CONFIG = str(_PROJECT_ROOT / "setup" / "llama32_3b_config")
 
 MAX_TOKENS_MIN = 1
 MAX_TOKENS_MAX = 500
