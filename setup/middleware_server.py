@@ -14,9 +14,10 @@ import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-
+from utilities.backend_errors import AdapterUploadError
 from LlamaClient import LlamaClient  # uploaded file name
 from utilities.AsyncRWLock import AsyncRWLock
+from utilities.adapter_validation import validate_adapter
 from utilities.constants import (
     LLAMA_BASE_URL,
     LLAMA_SERVER_BINARY,
@@ -175,24 +176,6 @@ async def _http_exception_handler(_request: Request, exc: HTTPException):
         message=str(exc.detail),
         request_id=None,
     )
-
-# What we will accept as weights. A little restrictive, but in keeping with more global conventions that are reasonable
-# to assume will be respected in practice.
-_ADAPTER_WEIGHTS_OPTIONS = {"adapter_model.safetensors", "adapter_model.bin"}
-
-# When an adapter addition request comes in, it is essentially just asking the middleware to deal with the files it
-# dumped at a specific location. This function performs the first check on those files before processing / registration,
-# which is checking to see if those files actually exist where the POST to the middleware said they would be.
-# Additionally, the function checks if the files are what the mdoel can work with. Note: this after the first first
-# check, this is the first check for a .safetensor type upload (which is the more common case anyways).
-def _validate_adapter_dir(adapter_path: Path) -> Optional[str]:
-    missing = []
-    if not (adapter_path / "adapter_config.json").exists():
-        missing.append("adapter_config.json")
-    if not any((adapter_path / f).exists() for f in _ADAPTER_WEIGHTS_OPTIONS):
-        missing.append("adapter_model.safetensors (or adapter_model.bin)")
-    return f"Missing required files: {', '.join(missing)}" if missing else None
-
 
 # ACTUAL REQUEST HANDLING SECTION STARTING HERE
 
@@ -408,9 +391,13 @@ async def create_adapter(req: AdapterCreateRequest):
     # Collect path from the request message
     adapter_path = Path(LLAMA_ADAPTERS_DIR) / req.adapter_dir
 
-    # Do an initial check to see if the directory indicated by the post request exists at all.
-    # If it does not return a corresponding error message.
-    if not adapter_path.exists() or not adapter_path.is_dir():
+    # validate_adapter() does blocking file I/O and may invoke a subprocess to convert safetensors to .gguf,
+    # so we offload it to a thread pool to avoid stalling the event loop during what could be a multi-second operation.
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, validate_adapter, adapter_path)
+    except FileNotFoundError:
+        # The directory indicated by the request does not exist on disk
         return _error_response(
             http_status=404,
             err_type="not_found_error",
@@ -418,71 +405,30 @@ async def create_adapter(req: AdapterCreateRequest):
             message=f"Directory '{req.adapter_dir}' was not found in the adapters folder.",
             request_id=req.request_id,
         )
+    except AdapterUploadError as err:
+        # The files are present but are invalid or incompatible with the base model.
+        # AdapterUploadError is the base class for InvalidGGUFUploadError and InvalidSafetensorsUploadError,
+        # so this branch catches both subtypes with the description embedded in the exception message.
+        return _error_response(
+            http_status=400,
+            err_type="invalid_request_error",
+            code="INCOMPATIBLE_ADAPTER",
+            message=str(err),
+            request_id=req.request_id,
+        )
+    except Exception as err:
+        # Catch-all for anything unexpected during validation (e.g. disk errors, library failures)
+        return _error_response(
+            http_status=500,
+            err_type="api_error",
+            code="INTERNAL_ERROR",
+            message=f"Adapter validation failed unexpectedly: {err}",
+            request_id=req.request_id,
+        )
 
-    # TODO: This is rather fragile
-    # Check if a .gguf file with the expected filename exists
+    # Get the .gguf file (it exists for sure at this point)
+    # Note: We look for this specific filename because the validate_adapter() function enforces it (contract)
     gguf_path = Path(LLAMA_ADAPTERS_DIR) / req.adapter_dir / f"{req.adapter_dir}.gguf"
-
-    # If a .gguf file is not found then we (optimistically) assume that this is a safetensor style upload
-    if not gguf_path.exists():
-        # We always look for a config file, standard with .safetensor format LoRA adapters, and necessary for conversion
-        # and proper usage in general
-        config_path = adapter_path / "adapter_config.json"
-        if config_path.exists():
-            try:
-                with open(config_path) as f:
-                    _cfg = json.load(f)
-
-                # A classic value that you'd expect in a config file for LoRA adapters. We use this as a flag for
-                # validity for the (common) format we are looking for
-                if "lora_alpha" not in _cfg:
-                    return _error_response(
-                        http_status=400,
-                        err_type="invalid_request_error",
-                        code="INCOMPATIBLE_ADAPTER_FORMAT",
-                        message="Only HuggingFace PEFT adapters are supported. This adapter appears to use a different format (e.g. MLX) and cannot be converted.",
-                        request_id=req.request_id,
-                    )
-            except ValueError:
-                pass  # malformed JSON is caught later by the conversion step
-
-        # At this point we are moving forward with our assumption that things were uploaded as .safetensor format PEFT
-        # adapters. This next section checks that we have the weight files as well
-        msg = _validate_adapter_dir(adapter_path)
-        if msg:
-            return _error_response(
-                http_status=400,
-                err_type="invalid_request_error",
-                code="MISSING_ADAPTER_FILES",
-                message=msg,
-                request_id=req.request_id,
-            )
-
-
-        # We then do the conversion from .safetensor to .gguf asynchronously to not block the whole system. It doesn't
-        # take super long (on a MacBook Pro 2021 w an M1 Max chip) but there is no reason to lock up the whole AI
-        # server. Hence we need to get the asyncio loop
-        loop = asyncio.get_running_loop()
-        try:
-            gguf_path = await loop.run_in_executor(None, _llama.convert_adapter, adapter_path)
-        except RuntimeError as e:
-            return _error_response(
-                http_status=500,
-                err_type="api_error",
-                code="CONVERSION_FAILED",
-                message=str(e),
-                request_id=req.request_id,
-            )
-
-        # Delete weight files as they are no longer needed once GGUF exists
-        # TODO: GENERAL CLEANUP OF UNRECOGNIZED FILES
-        for disposable in ("adapter_model.safetensors", "adapter_model.bin", "adapter_config.json"):
-            p = adapter_path / disposable
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError as e:
-                    logging.warning("Could not delete %s: %s", p, e)
 
     # We treat .gguf adapter files (that were originally in that form or not) the same
     gguf_filename = str(gguf_path.relative_to(Path(LLAMA_ADAPTERS_DIR)))

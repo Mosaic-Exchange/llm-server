@@ -9,7 +9,7 @@ from typing import Optional, List, Any
 from gguf.gguf_reader import GGUFReader
 from safetensors import safe_open
 
-from constants import (
+from .constants import (
     LLAMA_MODEL_PATH,
     LLAMA_ADAPTERS_DIR,
     LLAMA_CONVERT_SCRIPT,
@@ -18,7 +18,7 @@ from constants import (
     LLAMA_VALID_MODULES
 )
 
-from backend_errors import (
+from .backend_errors import (
     InvalidGGUFUploadError,
     AdapterUploadError,
     InvalidSafetensorsUploadError
@@ -43,11 +43,10 @@ from backend_errors import (
 # NC6 --> Random files in the specified filepath (No adapter)
 
 def validate_adapter(
-        adapter_path: str
+        adapter_path: Path
 ) -> Optional[bool]:
 
     # Check if specified filepath exists (NC1)
-    adapter_path = Path(LLAMA_ADAPTERS_DIR) / adapter_path
     if not adapter_path.exists() or not adapter_path.is_dir():
         raise FileNotFoundError(f"Adapter path '{adapter_path}' was not found.")
 
