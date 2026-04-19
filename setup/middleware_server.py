@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import sys
 import uuid
 from pathlib import Path
@@ -14,7 +13,14 @@ import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from utilities.backend_errors import AdapterUploadError
+from utilities.backend_errors import (
+    AdapterUploadError,
+    AdapterStateError,
+    BackendUnavailableError,
+    BackendReloadTimeoutError,
+    InferenceError,
+    MalformedBackendResponseError,
+)
 from LlamaClient import LlamaClient  # uploaded file name
 from utilities.AsyncRWLock import AsyncRWLock
 from utilities.adapter_validation import validate_adapter
@@ -24,7 +30,7 @@ from utilities.constants import (
     LLAMA_MODEL_PATH,
     LLAMA_ADAPTERS_DIR,
     LLAMA_CONVERT_SCRIPT,
-    MAX_TOKENS_MIN,
+MAX_TOKENS_MIN,
     MAX_TOKENS_MAX,
     DEFAULT_MAX_TOKENS,
     DEFAULT_TEMPERATURE,
@@ -63,7 +69,6 @@ def _needs_write(adapter_filename: Optional[str]) -> bool:
         if adapter_filename is None or adapter_filename in _llama._active_adapters:
             return False
     return True
-
 
 # Startup maintenence. We want our users to only ever have to go through the adapter registration process once. That
 # means that when the server restarts it should be aware of all the adapters that were loaded in the past. So on startup
@@ -266,8 +271,46 @@ async def create_generation(req: GenerationCreateRequest):
         async with _rw_lock.reading():
             output = await _run_inference()
 
-    # TODO: catch specific exception types from LlamaClient (e.g. custom AdapterNotFoundError, InferenceError)
-    # before this broad handler so known failure modes return structured error codes instead of a flat 500
+    except BackendReloadTimeoutError as e:
+        return _error_response(
+            http_status=503,
+            err_type="api_error",
+            code="BACKEND_RELOAD_TIMEOUT",
+            message=str(e),
+            request_id=req.request_id,
+        )
+    except BackendUnavailableError as e:
+        return _error_response(
+            http_status=503,
+            err_type="api_error",
+            code="BACKEND_UNAVAILABLE",
+            message=str(e),
+            request_id=req.request_id,
+        )
+    except AdapterStateError as e:
+        return _error_response(
+            http_status=500,
+            err_type="api_error",
+            code="ADAPTER_STATE_INCONSISTENT",
+            message=str(e),
+            request_id=req.request_id,
+        )
+    except InferenceError as e:
+        return _error_response(
+            http_status=502,
+            err_type="api_error",
+            code="INFERENCE_FAILED",
+            message=str(e),
+            request_id=req.request_id,
+        )
+    except MalformedBackendResponseError as e:
+        return _error_response(
+            http_status=500,
+            err_type="api_error",
+            code="MALFORMED_BACKEND_RESPONSE",
+            message=str(e),
+            request_id=req.request_id,
+        )
     except Exception as e:
         return _error_response(
             http_status=500,
@@ -334,10 +377,6 @@ async def create_generation_stream(req: GenerationCreateRequest):
     #  is defined. If it were called inside stream() instead, it would run at stream-time rather than request-time
     needs_write = _needs_write(adapter_filename)
 
-    # TODO: catch specific exception types from LlamaClient (e.g. custom AdapterNotFoundError, InferenceError)
-    # before this broad handler so known failure modes return structured error codes instead of a flat 500.
-    # Note: the streaming endpoint currently has no try/except at all --> exceptions bubble up unhandled.
-
     # Unlike its cousin _run_inference() in the non-streaming version, the stream() function is more complex. It
     # handles its own adapter switching, locking, and inference (whereas _run_inference() lets its handler do
     # that. This is because the nature of a streaming response means that this must be a async generator.
@@ -353,35 +392,51 @@ async def create_generation_stream(req: GenerationCreateRequest):
         # Unlike in the non-streaming variant this is handled inside the stream() call (as mentioned above)
         loop = asyncio.get_running_loop()
 
-        # Lock policy is same as non-streaming version
-        if needs_write:
-            async with _rw_lock.writing():
-                if _needs_write(adapter_filename):
-                    if adapter_filename:
-                        await loop.run_in_executor(None, _llama.use_adapter_by_name, adapter_filename)
-                    else:
-                        await loop.run_in_executor(None, _llama.use_base_only)
-                    _current_inference_adapter = adapter_filename
+        try:
+            # Lock policy is same as non-streaming version
+            if needs_write:
+                async with _rw_lock.writing():
+                    if _needs_write(adapter_filename):
+                        if adapter_filename:
+                            await loop.run_in_executor(None, _llama.use_adapter_by_name, adapter_filename)
+                        else:
+                            await loop.run_in_executor(None, _llama.use_base_only)
+                        _current_inference_adapter = adapter_filename
 
-        # Write lock released before inference so concurrent readers aren't
-        # blocked for the full duration of a write-path request.
-        async with _rw_lock.reading():
-            gen = await loop.run_in_executor(None, lambda: _llama.chat(
-                message=req.message,
-                adapter_filename=None,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                min_p=min_p,
-                system_prompt=system_prompt,
-                stream=True,
-            ))
+            # Write lock released before inference so concurrent readers aren't
+            # blocked for the full duration of a write-path request.
+            async with _rw_lock.reading():
+                gen = await loop.run_in_executor(None, lambda: _llama.chat(
+                    message=req.message,
+                    adapter_filename=None,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    min_p=min_p,
+                    system_prompt=system_prompt,
+                    stream=True,
+                ))
 
-            # For reading in the data chunk by chunk as returned by the LlamaClient object
-            while True:
-                chunk = await loop.run_in_executor(None, next, gen, sentinel)
-                if chunk is sentinel:
-                    break
-                yield chunk
+                # For reading in the data chunk by chunk as returned by the LlamaClient object
+                while True:
+                    chunk = await loop.run_in_executor(None, next, gen, sentinel)
+                    if chunk is sentinel:
+                        break
+                    yield chunk
+
+        # Headers are already sent at this point so the status code cannot change.
+        # Each handler yields a JSON error token the client can detect at the end of the stream.
+        except BackendReloadTimeoutError as e:
+            yield json.dumps({"error": {"code": "BACKEND_RELOAD_TIMEOUT", "message": str(e)}})
+        except BackendUnavailableError as e:
+            yield json.dumps({"error": {"code": "BACKEND_UNAVAILABLE", "message": str(e)}})
+        except AdapterStateError as e:
+            yield json.dumps({"error": {"code": "ADAPTER_STATE_INCONSISTENT", "message": str(e)}})
+        except InferenceError as e:
+            yield json.dumps({"error": {"code": "INFERENCE_FAILED", "message": str(e)}})
+        except MalformedBackendResponseError as e:
+            yield json.dumps({"error": {"code": "MALFORMED_BACKEND_RESPONSE", "message": str(e)}})
+        except Exception as e:
+            yield json.dumps({"error": {"code": "INTERNAL_ERROR", "message": f"An unexpected error occurred: {e}"}})
 
     return StreamingResponse(stream(), media_type="text/plain")
 

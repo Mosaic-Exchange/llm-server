@@ -11,6 +11,15 @@ import requests
 
 from hardware import compute_max_loaded_adapters
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utilities.backend_errors import (
+    AdapterStateError,
+    BackendUnavailableError,
+    BackendReloadTimeoutError,
+    InferenceError,
+    MalformedBackendResponseError,
+)
+
 logger = logging.getLogger(__name__)
 
 ADAPTER_MEMORY_PATH = Path(__file__).parent.parent / "database" / "adapter_memory.json"
@@ -162,7 +171,7 @@ class LlamaClient:
     # that are considered active needs to be maintained; that happens here.
     def _ensure_adapter_active(self, filename: str) -> int:
         if filename not in self._known_adapters:
-            raise ValueError(f"Adapter '{filename}' is not in the known adapters list.")
+            raise AdapterStateError(f"Adapter '{filename}' is not in the known adapters list.")
 
         # This part is for implementiing the LRU policy we mention in the constructor commentary / documentation
         # The 'if' updates the ordered
@@ -239,9 +248,12 @@ class LlamaClient:
             cmd.extend(["--lora", str(adapter_path)])
 
         logger.info(f"Reloading llama-server: {' '.join(cmd)}")
-        self._server_process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        try:
+            self._server_process = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except OSError as e:
+            raise BackendUnavailableError(f"Failed to start llama-server process: {e}") from e
         self._wait_for_server()
 
     # When starting up the server there is some downtime (that varies based on an individual's machine). Particularly
@@ -261,7 +273,7 @@ class LlamaClient:
             except Exception:
                 pass
             time.sleep(1)
-        raise TimeoutError(f"llama-server did not become ready within {timeout}s.")
+        raise BackendReloadTimeoutError(f"llama-server did not become ready within {timeout}s.")
 
     # Communicates directly with the llama.cpp llama-server to find out what adapters are currently active on top of the
     # base model. A wrapper to a llama.cpp server call essentially.
@@ -307,19 +319,29 @@ class LlamaClient:
     # model. In fact, you never need to reload the model to use the base model without any adapters. Same as the
     # use_adapter() function, this function also serves as a wrapper for a call to the llama-server from llama.cpp
     def use_base_only(self):
-        adapters_info = self.list_adapters()
-        if not adapters_info:
-            return
-        payload = [{"id": a["id"], "scale": 0.0} for a in adapters_info]
-        response = requests.post(f"{self.base_url}/lora-adapters", json=payload)
-        response.raise_for_status()
+        try:
+            adapters_info = self.list_adapters()
+            if not adapters_info:
+                return
+            payload = [{"id": a["id"], "scale": 0.0} for a in adapters_info]
+            response = requests.post(f"{self.base_url}/lora-adapters", json=payload)
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError as e:
+            raise BackendUnavailableError(f"Could not reach llama-server while clearing adapter scales: {e}") from e
+        except requests.exceptions.HTTPError as e:
+            raise BackendUnavailableError(f"llama-server rejected adapter clear request: {e}") from e
 
     # Gets adapter id by its filename (not as robust, potential filename overlaps, but so much semantically clearer)
     # TODO: Maybe detect for duplicate adapter file names at upload time. I'm just worried about people uploading the same adapter multiple times.
     def use_adapter_by_name(self, filename: str, scale: float = 1.0) -> int:
         # TODO: deprecate adapter_id in favor of this
         llama_id = self._ensure_adapter_active(filename)
-        self.use_adapter(llama_id, scale)
+        try:
+            self.use_adapter(llama_id, scale)
+        except requests.exceptions.ConnectionError as e:
+            raise BackendUnavailableError(f"Could not reach llama-server while setting adapter scale: {e}") from e
+        except requests.exceptions.HTTPError as e:
+            raise BackendUnavailableError(f"llama-server rejected adapter scale update: {e}") from e
         return llama_id
 
     # The base unit of actually chatting with the LLM. Formats the response with all the parameters that are configured
@@ -364,9 +386,17 @@ class LlamaClient:
     # back end. It then waits for a response and returns it to the caller. This is the non-streaming version, so the
     # output is returned in one big block.
     def _send_chat(self, payload: Dict) -> str:
-        response = requests.post(f"{self.base_url}/v1/chat/completions", json=payload)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        try:
+            response = requests.post(f"{self.base_url}/v1/chat/completions", json=payload)
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError as e:
+            raise BackendUnavailableError(f"Could not reach llama-server for inference: {e}") from e
+        except requests.exceptions.HTTPError as e:
+            raise InferenceError(f"llama-server returned an error on inference: {e}") from e
+        try:
+            return response.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as e:
+            raise MalformedBackendResponseError(f"Unexpected response shape from llama-server: {e}") from e
 
     # Similarly to the non-streaming version _send_chat() this function takes the message formatted in the chat()
     # function and forwards it to the llama-server back back end. However, as this is the streaming version there are
@@ -376,10 +406,15 @@ class LlamaClient:
     # more detail for curious readers.
     def _stream_chat(self, payload: Dict) -> Iterator[str]:
         payload["stream"] = True
-        response = requests.post(
-            f"{self.base_url}/v1/chat/completions", json=payload, stream=True
-        )
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                f"{self.base_url}/v1/chat/completions", json=payload, stream=True
+            )
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError as e:
+            raise BackendUnavailableError(f"Could not reach llama-server for streaming inference: {e}") from e
+        except requests.exceptions.HTTPError as e:
+            raise InferenceError(f"llama-server returned an error on streaming inference: {e}") from e
         for line in response.iter_lines(): # Read response body one line at a time
             if line: # skip blanks
                 line = line.decode("utf-8") # decode from raw
