@@ -29,3 +29,25 @@ class InvalidGGUFUploadError(AdapterUploadError):
 
 
 # Adapter does not exist --> for when people request the usage of an adapter that does not exist
+
+# Raised when an adapter ID passed the registry check but is missing from LlamaClient's known list
+# — indicates an internal state inconsistency rather than a caller error
+class AdapterStateError(Exception):
+    pass
+
+# Raised when the llama-server process cannot be reached (connection refused, process crashed, etc.)
+class BackendUnavailableError(Exception):
+    pass
+
+# Raised specifically when _wait_for_server() exhausts its timeout; subclasses BackendUnavailableError
+# so callers can catch at either granularity
+class BackendReloadTimeoutError(BackendUnavailableError):
+    pass
+
+# Raised when the llama-server returns a non-2xx response on a chat completion request
+class InferenceError(Exception):
+    pass
+
+# Raised when the llama-server response does not match the expected schema (e.g. missing "choices")
+class MalformedBackendResponseError(Exception):
+    pass
