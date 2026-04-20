@@ -57,6 +57,13 @@ curl -X POST http://127.0.0.1:4000/v1/adapters \
   -d '{"adapter_dir": "structured_answer_adapter", "request_id": "reg-structured"}'
 ```
 
+#### 4.2 - Messed up adapter upload
+```bash
+curl -X POST http://127.0.0.1:4000/v1/adapters \
+  -H "Content-Type: application/json" \
+  -d '{"adapter_dir": "pioneer", "request_id": "reg-pioneer"}'  
+```
+
 ## 5. Query Gordon Ramsey
 
 ```bash
