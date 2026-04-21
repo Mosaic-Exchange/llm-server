@@ -72,14 +72,12 @@ def validate_adapter(
         return _handle_safetensors_case(adapter_path, safetensors_files[0])
 
     # Case #3: There is neither a .gguf nor is there a .safetensor file in the directory
-    # In this case trash it all (we know there is at least a directory, empty or with garbage)
     _garbage_collect(
         adapter_path=adapter_path,
         gc_list=None,
         trash=None
     )
-
-    return False
+    raise AdapterUploadError(adapter_path, "No .gguf or .safetensors file found in the adapter directory.")
 
 def _get_files_by_extension(dir_path: Path, extension: str) -> List[Path]:
     return [
