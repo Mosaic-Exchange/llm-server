@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -575,6 +577,12 @@ async def health():
     }
 
 # ACTUAL REQUEST HANDLING SECTION ENDING HERE
+
+@app.post("/shutdown")
+async def shutdown():
+    os.kill(os.getpid(), signal.SIGTERM)
+    return {"status": "shutting down"}
+
 
 if __name__ == '__main__':
     import uvicorn
