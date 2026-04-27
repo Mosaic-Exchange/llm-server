@@ -1,7 +1,7 @@
 #!/bin/bash
 # setup_llama_cpp.sh - Automatic llama.cpp setup with hardware detection (CMake version)
 
-set -e  # Exit on error
+set -eu  # Exit on error, error on unassigned variables
 
 echo "=== llama.cpp Automatic Setup Script (CMake) ==="
 echo ""
@@ -17,9 +17,9 @@ check_cmake() {
     if ! command -v cmake &> /dev/null; then
         echo -e "${RED}✗ CMake not found${NC}"
         echo "Please install CMake:"
-        if [[ "$OSTYPE" == "darwin"* ]]; then
+        if [[ "${OSTYPE:-}" == "darwin"* ]]; then
             echo "  brew install cmake"
-        elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        elif [[ "${OSTYPE:-}" == "linux-gnu"* ]]; then
             echo "  sudo apt-get install cmake  # Debian/Ubuntu"
             echo "  sudo dnf install cmake      # Fedora"
         fi
@@ -32,11 +32,12 @@ check_cmake() {
 
 # Detect OS
 detect_os() {
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    local os_type="${OSTYPE:-}"
+    if [[ "$os_type" == "linux-gnu"* ]]; then
         echo "linux"
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
+    elif [[ "$os_type" == "darwin"* ]]; then
         echo "macos"
-    elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]]; then
+    elif [[ "$os_type" == "msys" ]] || [[ "$os_type" == "win32" ]]; then
         echo "windows"
     else
         echo "unknown"
@@ -192,6 +193,7 @@ echo "================================================"
 echo ""
 
 # Prompt user for confirmation
+REPLY=""
 read -p "Proceed with this configuration? (y/n) " -n 1 -r
 echo ""
 
@@ -201,6 +203,7 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 # Clone repository into a temporary build directory
+PROJECT_DIR="${PROJECT_DIR:-.}"
 LLAMA_BUILD_DIR="$PROJECT_DIR/.llama_build"
 if [ ! -d "$LLAMA_BUILD_DIR" ]; then
     echo "Cloning llama.cpp repository (shallow)..."

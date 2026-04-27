@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Function to report error to both stdout and stderr
 report_error() {
@@ -16,13 +17,13 @@ command_exists() {
 }
 
 PIPENV_CMD=""
+PYTHON_CMD=""
 
 # Check if pipenv is on the path
 if command_exists "pipenv"; then
     PIPENV_CMD="pipenv"
 else
     # Pipenv not on path, check for python or python3
-    PYTHON_CMD=""
     if command_exists "python3"; then
         PYTHON_CMD="python3"
     elif command_exists "python"; then
@@ -36,9 +37,14 @@ else
     "$PYTHON_CMD" -m venv .venv-pipenv || { report_error "Error: Failed to create virtualenv for pipenv"; exit 1; }
 
     # Install pipenv within the virtualenv
-    ./.venv-pipenv/bin/pip install pipenv || { report_error "Error: Failed to install pipenv into virtual environment"; exit 1; }
+    VENV_BIN_DIR="./.venv-pipenv/bin"
+    if [[ "${OSTYPE:-}" == "msys" || "${OSTYPE:-}" == "win32" || "${OSTYPE:-}" == "cygwin" ]]; then
+        VENV_BIN_DIR="./.venv-pipenv/Scripts"
+    fi
+
+    "$VENV_BIN_DIR/pip" install pipenv || { report_error "Error: Failed to install pipenv into virtual environment"; exit 1; }
     
-    PIPENV_CMD="./.venv-pipenv/bin/pipenv"
+    PIPENV_CMD="$VENV_BIN_DIR/pipenv"
 fi
 
 # Run pipenv install from the script's directory
